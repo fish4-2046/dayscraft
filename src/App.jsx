@@ -156,6 +156,7 @@ export default function App() {
   const [worldNew, setWorldNew] = useState(false);
   const [drag, setDrag] = useState(null); // {block, src, x, y, hover}
   const [charge, setCharge] = useState(null);
+  const [backfill, setBackfill] = useState(false); // 补录模式：临时解锁历史（不持久化）
   const [detail, setDetail] = useState(null); // {block, src} 周视图点击方块的详情弹窗
 
   const gesture = useRef(null);
@@ -165,6 +166,8 @@ export default function App() {
   const viewRef = useRef(view); viewRef.current = view;
   const dayDateRef = useRef(dayDate); dayDateRef.current = dayDate;
   const daysRef = useRef(days); daysRef.current = days;
+  const backfillRef = useRef(backfill); backfillRef.current = backfill;
+  const ruleOpts = () => ({ today, backfill: backfillRef.current });
 
   const allBlocks = [...PRESETS, ...customs];
   const dayOf = (date) => days[date] ?? emptyDay();
@@ -271,8 +274,8 @@ export default function App() {
     const g = { block, src, x0: e.clientX, y0: e.clientY, mode: "pending", chargeTimer: null, chargeStart: 0 };
     gesture.current = g;
     const isDone = src.kind === "cell" && !!block.done;
-    // 长按敲碎：仅日视图内、已放置且未完成的方块
-    if (src.kind === "cell" && viewRef.current === "day" && !isDone) {
+    // 长按敲碎：仅日视图内、已放置且未完成、日期允许（今天/昨天/补录）的方块
+    if (src.kind === "cell" && viewRef.current === "day" && !isDone && canSmash(src.date, ruleOpts())) {
       g.chargeStart = performance.now();
       g.chargeTimer = setInterval(() => {
         const el = performance.now() - g.chargeStart;
@@ -290,7 +293,7 @@ export default function App() {
     const move = (ev) => {
       const gg = gesture.current;
       if (!gg) return;
-      if (gg.mode === "pending" && !(gg.src.kind === "cell" && gg.block.done) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
+      if (gg.mode === "pending" && !(gg.src.kind === "cell" && (gg.block.done || !canPlace(gg.src.date, ruleOpts()))) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
         if (gg.chargeTimer) { clearInterval(gg.chargeTimer); gg.chargeTimer = null; setCharge(null); }
         gg.mode = "drag";
       }
@@ -306,12 +309,16 @@ export default function App() {
           // 点按百宝箱方块
           if (viewRef.current === "day") {
             const date = dayDateRef.current;
-            const d = daysRef.current[date] ?? emptyDay();
-            const band = ["morning", "afternoon", "evening"].find((k) => d[k].length < CAP);
-            if (band) {
-              placeBlock({ kind: "box" }, gg.block, date, band);
-              showToast(`放到${BANDS.find((b) => b.key === band).name}啦，可以拖动换时间`);
-            } else showToast("今天满啦！");
+            if (!canPlace(date, ruleOpts())) {
+              showToast("过去的日子不能改啦");
+            } else {
+              const d = daysRef.current[date] ?? emptyDay();
+              const band = ["morning", "afternoon", "evening"].find((k) => d[k].length < CAP);
+              if (band) {
+                placeBlock({ kind: "box" }, gg.block, date, band);
+                showToast(`放到${BANDS.find((b) => b.key === band).name}啦，可以拖动换时间`);
+              } else showToast("今天满啦！");
+            }
           } else {
             showToast("把方块拖到想放的格子里吧 👆");
           }
@@ -321,7 +328,9 @@ export default function App() {
         } else if (gg.mode === "drag") {
           const cell = findCellAt(ev.clientX, ev.clientY);
           if (cell) {
-            if (cell.band === "night") {
+            if (!canPlace(cell.date, ruleOpts())) {
+              showToast(cell.date < today ? "过去的日子不能改啦" : "还没到这一天呢");
+            } else if (cell.band === "night") {
               sndGrowl();
               showToast("🧟 黑夜有怪物出没，这是睡觉时间！");
             } else {
@@ -448,10 +457,32 @@ export default function App() {
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 14px 8px", flexWrap: "wrap" }}>
         <PixBtn active={view === "week"} onClick={() => setView("week")}>🗓️ 一周规划</PixBtn>
         <PixBtn active={view === "day"} onClick={() => { setDayDate(today); setView("day"); }}>☀️ 今日</PixBtn>
+        {view === "week" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <PixBtn onClick={() => setAnchorMonday((m) => (m > EPOCH_MONDAY ? addDays(m, -7) : m))}
+              style={{ opacity: anchorMonday > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
+            <span style={{ fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", minWidth: 128, textAlign: "center" }}>
+              {fmtMD(anchorMonday)} – {fmtMD(addDays(anchorMonday, 6))}
+            </span>
+            <PixBtn onClick={() => setAnchorMonday((m) => (m < maxMonday() ? addDays(m, 7) : m))}
+              style={{ opacity: anchorMonday < maxMonday() ? 1 : 0.35 }}>›</PixBtn>
+          </div>
+        )}
         {view === "day" && (
-          <span style={{ fontWeight: 900, fontSize: 14, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
-            {fmtMD(dayDate)} {DAY_NAMES[dowIdx(dayDate)]}{dayDate === today ? "（今天）" : ""} — 做完一件，按住方块敲碎它！🔨
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <PixBtn onClick={() => setDayDate((d) => (d > EPOCH_MONDAY ? addDays(d, -1) : d))}
+              style={{ opacity: dayDate > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
+            <span style={{ fontWeight: 900, fontSize: 14, color: "#fff", textShadow: "1px 1px 0 #3a3a3a" }}>
+              {fmtMD(dayDate)} {DAY_NAMES[dowIdx(dayDate)]}{dayDate === today ? "（今天）" : ""}
+            </span>
+            <PixBtn onClick={() => setDayDate((d) => (d < addDays(maxMonday(), 6) ? addDays(d, 1) : d))}
+              style={{ opacity: dayDate < addDays(maxMonday(), 6) ? 1 : 0.35 }}>›</PixBtn>
+            {canSmash(dayDate, { today, backfill }) && (
+              <span style={{ fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
+                做完一件，按住方块敲碎它！🔨
+              </span>
+            )}
+          </div>
         )}
         {view === "week" && (
           <span style={{ fontWeight: 700, fontSize: 12, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
@@ -474,11 +505,12 @@ export default function App() {
               <div />
               {dates.map((date, i) => (
                 <button key={date} onClick={() => { setDayDate(date); setView("day"); sndPlace(); }} style={{
-                  border: "2px solid rgba(0,0,0,0.25)", background: date === today ? "#ffe66d" : "rgba(255,255,255,0.75)",
-                  fontWeight: 900, fontSize: 13, padding: "8px 4px", cursor: "pointer", fontFamily: "inherit",
+                  border: "2px solid rgba(0,0,0,0.25)",
+                  background: date === today ? "#ffe66d" : date < today ? "rgba(200,200,200,0.55)" : "rgba(255,255,255,0.75)",
+                  fontWeight: 900, fontSize: 12, padding: "8px 2px", cursor: "pointer", fontFamily: "inherit",
                   color: "#3a3a3a",
                 }}>
-                  {date === today ? "☀️ " : ""}{DAY_NAMES[i]}
+                  {date === today ? "☀️ " : ""}{DAY_NAMES[i]} {fmtShort(date)}
                 </button>
               ))}
               {/* 四个时段行 */}
@@ -619,6 +651,7 @@ export default function App() {
         <DetailModal
           detail={detail}
           bevel={bevel}
+          canEdit={canPlace(detail.src.date, { today, backfill })}
           onClose={() => setDetail(null)}
           onRemove={() => { removeBlock(detail.src, detail.block); setDetail(null); }}
           onGoto={() => { setDayDate(detail.src.date); setView("day"); setDetail(null); sndPlace(); }}
@@ -671,7 +704,7 @@ function FragmentRow({ band, dates, days, drag, Block, bevel, today }) {
         return (
           <div key={date} data-cell={`${date}|${band.key}`} style={{
             border: hairline,
-            background: date === today ? "rgba(255,230,109,0.30)" : "rgba(255,255,255,0.12)",
+            background: date === today ? "rgba(255,230,109,0.30)" : date < today ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.12)",
             minHeight: 92, padding: 6,
             display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", alignContent: "flex-start",
             outline: hovered ? "3px dashed #ffe66d" : "none", outlineOffset: -5,
@@ -687,7 +720,7 @@ function FragmentRow({ band, dates, days, drag, Block, bevel, today }) {
 }
 
 /* ---------- 方块详情弹窗（周视图点按） ---------- */
-function DetailModal({ detail, onClose, onRemove, onGoto, bevel }) {
+function DetailModal({ detail, onClose, onRemove, onGoto, bevel, canEdit }) {
   const { block, src } = detail;
   const band = BANDS.find((b) => b.key === src.band);
   return (
@@ -717,11 +750,13 @@ function DetailModal({ detail, onClose, onRemove, onGoto, bevel }) {
           }}>☀️ 去这一天</button>
           {block.done ? (
             <div style={{ flex: 1, padding: 10, fontWeight: 900, fontSize: 13, textAlign: "center", color: "#3a3a3a", background: "#b8e6a3", ...bevel(false) }}>✔ 已完成</div>
-          ) : (
+          ) : canEdit ? (
             <button onClick={onRemove} style={{
               flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
               ...bevel(true), background: "#C6C6C6", color: "#3a3a3a",
             }}>🧰 移回百宝箱</button>
+          ) : (
+            <div style={{ flex: 1, padding: 10, fontWeight: 700, fontSize: 13, textAlign: "center", color: "#6a6a6a", background: "#d8d8d8", ...bevel(false) }}>💤 过去的日子只能看看</div>
           )}
         </div>
         <div style={{ fontSize: 11, color: "#6a6a6a", marginTop: 10, textAlign: "center" }}>拖动方块可以换到别的格子</div>
