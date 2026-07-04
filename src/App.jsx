@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { loadLocal, saveLocal } from "./lib/storage";
+import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
+import { canPlace, canSmash } from "./lib/rules";
 
 /* ============================================================
    方块时间 DaysCraft — 周视图为默认的"家庭规划表"
@@ -128,20 +130,21 @@ const uid = () => "b" + Date.now().toString(36) + (uidSeq++).toString(36);
 
 /* ============================================================ */
 export default function App() {
-  const todayIdx = (new Date().getDay() + 6) % 7;
+  const today = todayStr();
+  const thisMonday = mondayOf(today);
   const [saved] = useState(loadLocal);
-  const [week, setWeek] = useState(() => {
-    if (saved?.week) return saved.week;
-    const w = Array.from({ length: 7 }, emptyDay);
-    w[todayIdx] = {
+  const [days, setDays] = useState(() => {
+    if (saved?.days) return saved.days;
+    // 全新用户：给今天放两个演示方块
+    return { [today]: {
       morning: [{ id: uid(), ...PRESETS[1] }],
       afternoon: [{ id: uid(), ...PRESETS[3] }],
       evening: [],
-    };
-    return w;
+    } };
   });
   const [view, setView] = useState("week"); // 默认周视图
-  const [dayIdx, setDayIdx] = useState(todayIdx);
+  const [anchorMonday, setAnchorMonday] = useState(thisMonday); // 周视图当前显示的周
+  const [dayDate, setDayDate] = useState(today); // 日视图当前显示的天
   const [customs, setCustoms] = useState(() => saved?.customs ?? []);
   const [showEditor, setShowEditor] = useState(false);
   const [materials, setMaterials] = useState(() => saved?.materials ?? { stone: 0, grass: 0, wood: 0 });
@@ -160,14 +163,17 @@ export default function App() {
   const hudRef = useRef({});
   const toastTimer = useRef(null);
   const viewRef = useRef(view); viewRef.current = view;
-  const dayIdxRef = useRef(dayIdx); dayIdxRef.current = dayIdx;
+  const dayDateRef = useRef(dayDate); dayDateRef.current = dayDate;
+  const daysRef = useRef(days); daysRef.current = days;
 
   const allBlocks = [...PRESETS, ...customs];
+  const dayOf = (date) => days[date] ?? emptyDay();
+  const setDay = (date, updater) => setDays((ds) => ({ ...ds, [date]: updater(ds[date] ?? emptyDay()) }));
 
   /* ---- 本地存档 ---- */
   useEffect(() => {
-    saveLocal({ version: 1, week, customs, materials, totalEver, updatedAt: Date.now() });
-  }, [week, customs, materials, totalEver]);
+    saveLocal({ version: 2, days, customs, materials, totalEver, updatedAt: Date.now() });
+  }, [days, customs, materials, totalEver]);
 
   const showToast = useCallback((msg) => {
     clearTimeout(toastTimer.current);
@@ -180,33 +186,31 @@ export default function App() {
   const nextNeed = [1, 3, 5, 8, 12][worldStage] ?? null;
 
   /* ---- 放置 / 移动 ---- */
-  const placeBlock = useCallback((src, block, dDay, dBand) => {
-    setWeek((w) => {
-      const nw = w.map((d) => ({ morning: [...d.morning], afternoon: [...d.afternoon], evening: [...d.evening] }));
+  const placeBlock = useCallback((src, block, dDate, dBand) => {
+    setDays((ds) => {
+      const get = (date) => ds[date] ?? emptyDay();
+      if (src.kind === "cell" && src.date === dDate && src.band === dBand) return ds; // 原地不动
+      if (get(dDate)[dBand].length >= CAP) {
+        showToast(`${DAY_NAMES[dowIdx(dDate)]}${BANDS.find((b) => b.key === dBand).name}满啦！`);
+        return ds;
+      }
+      const nds = { ...ds };
       if (src.kind === "cell") {
-        if (src.day === dDay && src.band === dBand) return w; // 原地不动
-        nw[src.day][src.band] = nw[src.day][src.band].filter((b) => b.id !== block.id);
+        nds[src.date] = { ...get(src.date), [src.band]: get(src.date)[src.band].filter((b) => b.id !== block.id) };
       }
-      if (nw[dDay][dBand].length >= CAP) {
-        showToast(`${DAY_NAMES[dDay]}${BANDS.find((b) => b.key === dBand).name}满啦！`);
-        return w;
-      }
+      const base = nds[dDate] ?? emptyDay();
       const inst = src.kind === "box"
         ? { id: uid(), icon: block.icon, label: block.label, tex: block.tex }
         : block;
-      nw[dDay][dBand] = [...nw[dDay][dBand], inst];
+      nds[dDate] = { ...base, [dBand]: [...base[dBand], inst] };
       sndPlace();
-      return nw;
+      return nds;
     });
   }, [showToast]);
 
   const removeBlock = useCallback((src, block) => {
     if (src.kind !== "cell") return;
-    setWeek((w) => {
-      const nw = [...w];
-      nw[src.day] = { ...nw[src.day], [src.band]: nw[src.day][src.band].filter((b) => b.id !== block.id) };
-      return nw;
-    });
+    setDay(src.date, (d) => ({ ...d, [src.band]: d[src.band].filter((b) => b.id !== block.id) }));
     showToast("方块回百宝箱啦");
   }, [showToast]);
 
@@ -240,11 +244,10 @@ export default function App() {
         });
       }, 620);
     }
-    setWeek((w) => {
-      const nw = [...w];
-      nw[src.day] = { ...nw[src.day], [src.band]: nw[src.day][src.band].filter((b) => b.id !== block.id) };
-      return nw;
-    });
+    setDay(src.date, (d) => ({
+      ...d,
+      [src.band]: d[src.band].map((b) => b.id === block.id ? { ...b, done: true, doneAt: Date.now() } : b),
+    }));
   }, [showToast]);
 
   /* ---- 命中检测 ---- */
@@ -253,8 +256,8 @@ export default function App() {
     const cells = document.querySelectorAll("[data-cell]");
     for (const el of cells) {
       if (inRect(el.getBoundingClientRect(), x, y)) {
-        const [d, b] = el.getAttribute("data-cell").split("|");
-        return { day: +d, band: b };
+        const [date, band] = el.getAttribute("data-cell").split("|");
+        return { date, band };
       }
     }
     return null;
@@ -301,11 +304,11 @@ export default function App() {
         if (gg.mode === "pending" && gg.src.kind === "box") {
           // 点按百宝箱方块
           if (viewRef.current === "day") {
-            const day = dayIdxRef.current;
-            const w = weekRef.current;
-            const band = ["morning", "afternoon", "evening"].find((k) => w[day][k].length < CAP);
+            const date = dayDateRef.current;
+            const d = daysRef.current[date] ?? emptyDay();
+            const band = ["morning", "afternoon", "evening"].find((k) => d[k].length < CAP);
             if (band) {
-              placeBlock({ kind: "box" }, gg.block, day, band);
+              placeBlock({ kind: "box" }, gg.block, date, band);
               showToast(`放到${BANDS.find((b) => b.key === band).name}啦，可以拖动换时间`);
             } else showToast("今天满啦！");
           } else {
@@ -321,7 +324,7 @@ export default function App() {
               sndGrowl();
               showToast("🧟 黑夜有怪物出没，这是睡觉时间！");
             } else {
-              placeBlock(gg.src, gg.block, cell.day, cell.band);
+              placeBlock(gg.src, gg.block, cell.date, cell.band);
             }
           } else if (inRect(boxRef.current?.getBoundingClientRect(), ev.clientX, ev.clientY)) {
             removeBlock(gg.src, gg.block);
@@ -341,8 +344,6 @@ export default function App() {
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
   };
-  const weekRef = useRef(week); weekRef.current = week;
-
   /* ---- UI 基件 ---- */
   const bevel = (raised = true) => ({
     border: "4px solid",
@@ -399,7 +400,8 @@ export default function App() {
   };
 
   const vertical = typeof window !== "undefined" && window.innerWidth < 640;
-  const day = week[dayIdx];
+  const day = dayOf(dayDate);
+  const dates = weekDates(anchorMonday);
 
   return (
     <div style={{
@@ -434,10 +436,10 @@ export default function App() {
       {/* ===== 视图切换 ===== */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 14px 8px", flexWrap: "wrap" }}>
         <PixBtn active={view === "week"} onClick={() => setView("week")}>🗓️ 一周规划</PixBtn>
-        <PixBtn active={view === "day"} onClick={() => { setDayIdx(todayIdx); setView("day"); }}>☀️ 今日</PixBtn>
+        <PixBtn active={view === "day"} onClick={() => { setDayDate(today); setView("day"); }}>☀️ 今日</PixBtn>
         {view === "day" && (
           <span style={{ fontWeight: 900, fontSize: 14, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
-            {DAY_NAMES[dayIdx]}{dayIdx === todayIdx ? "（今天）" : ""} — 做完一件，按住方块敲碎它！🔨
+            {fmtMD(dayDate)} {DAY_NAMES[dowIdx(dayDate)]}{dayDate === today ? "（今天）" : ""} — 做完一件，按住方块敲碎它！🔨
           </span>
         )}
         {view === "week" && (
@@ -459,18 +461,18 @@ export default function App() {
             }}>
               {/* 表头 */}
               <div />
-              {DAY_NAMES.map((d, i) => (
-                <button key={d} onClick={() => { setDayIdx(i); setView("day"); sndPlace(); }} style={{
-                  border: "2px solid rgba(0,0,0,0.25)", background: i === todayIdx ? "#ffe66d" : "rgba(255,255,255,0.75)",
+              {dates.map((date, i) => (
+                <button key={date} onClick={() => { setDayDate(date); setView("day"); sndPlace(); }} style={{
+                  border: "2px solid rgba(0,0,0,0.25)", background: date === today ? "#ffe66d" : "rgba(255,255,255,0.75)",
                   fontWeight: 900, fontSize: 13, padding: "8px 4px", cursor: "pointer", fontFamily: "inherit",
                   color: "#3a3a3a",
                 }}>
-                  {i === todayIdx ? "☀️ " : ""}{d}
+                  {date === today ? "☀️ " : ""}{DAY_NAMES[i]}
                 </button>
               ))}
               {/* 四个时段行 */}
               {BANDS.map((band) => (
-                <FragmentRow key={band.key} band={band} week={week} drag={drag} Block={Block} bevel={bevel} todayIdx={todayIdx} />
+                <FragmentRow key={band.key} band={band} dates={dates} days={days} drag={drag} Block={Block} bevel={bevel} today={today} />
               ))}
             </div>
             </div>
@@ -528,11 +530,11 @@ export default function App() {
             {BANDS.map((band) => {
               const isNight = band.sleep;
               const blocks = isNight ? [] : day[band.key];
-              const hovered = drag && drag.hover && drag.hover.day === dayIdx && drag.hover.band === band.key;
+              const hovered = drag && drag.hover && drag.hover.date === dayDate && drag.hover.band === band.key;
               return (
                 <div
                   key={band.key}
-                  data-cell={`${dayIdx}|${band.key}`}
+                  data-cell={`${dayDate}|${band.key}`}
                   style={{
                     flex: isNight ? "0 0 84px" : 1, minHeight: isNight ? 84 : 110,
                     background: band.sky, ...bevel(false),
@@ -562,7 +564,7 @@ export default function App() {
                       <div style={{ display: "flex", gap: 22, flexWrap: "wrap", paddingBottom: 14 }}>
                         {blocks.map((b) => (
                           <div key={b.id} style={{ animation: "popIn 0.18s" }}>
-                            <Block block={b} src={{ kind: "cell", day: dayIdx, band: band.key }} size={68} />
+                            <Block block={b} src={{ kind: "cell", date: dayDate, band: band.key }} size={68} />
                           </div>
                         ))}
                       </div>
@@ -608,7 +610,7 @@ export default function App() {
           bevel={bevel}
           onClose={() => setDetail(null)}
           onRemove={() => { removeBlock(detail.src, detail.block); setDetail(null); }}
-          onGoto={() => { setDayIdx(detail.src.day); setView("day"); setDetail(null); sndPlace(); }}
+          onGoto={() => { setDayDate(detail.src.date); setView("day"); setDetail(null); sndPlace(); }}
         />
       )}
       {showEditor && (
@@ -628,7 +630,7 @@ export default function App() {
 }
 
 /* ---------- 周视图的一行（时段标签 + 7 个格子） ---------- */
-function FragmentRow({ band, week, drag, Block, bevel, todayIdx }) {
+function FragmentRow({ band, dates, days, drag, Block, bevel, today }) {
   const isNight = band.sleep;
   const hairline = "2px solid rgba(0,0,0,0.22)";
   return (
@@ -640,11 +642,12 @@ function FragmentRow({ band, week, drag, Block, bevel, todayIdx }) {
         <span style={{ fontSize: 20 }}>{band.icon}</span>
         <span style={{ fontWeight: 900, fontSize: 11, color: "#fff", textShadow: "1px 1px 0 #3a3a3a" }}>{band.name}</span>
       </div>
-      {week.map((d, di) => {
-        const hovered = drag && drag.hover && drag.hover.day === di && drag.hover.band === band.key;
+      {dates.map((date, di) => {
+        const d = days[date] ?? emptyDay();
+        const hovered = drag && drag.hover && drag.hover.date === date && drag.hover.band === band.key;
         if (isNight) {
           return (
-            <div key={di} data-cell={`${di}|night`} style={{
+            <div key={date} data-cell={`${date}|night`} style={{
               border: hairline, background: band.sky, minHeight: 54,
               display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
               outline: hovered ? "3px dashed #e5484d" : "none", outlineOffset: -5,
@@ -655,15 +658,15 @@ function FragmentRow({ band, week, drag, Block, bevel, todayIdx }) {
           );
         }
         return (
-          <div key={di} data-cell={`${di}|${band.key}`} style={{
+          <div key={date} data-cell={`${date}|${band.key}`} style={{
             border: hairline,
-            background: di === todayIdx ? "rgba(255,230,109,0.30)" : "rgba(255,255,255,0.12)",
+            background: date === today ? "rgba(255,230,109,0.30)" : "rgba(255,255,255,0.12)",
             minHeight: 92, padding: 6,
             display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", alignContent: "flex-start",
             outline: hovered ? "3px dashed #ffe66d" : "none", outlineOffset: -5,
           }}>
             {d[band.key].map((b) => (
-              <Block key={b.id} block={b} src={{ kind: "cell", day: di, band: band.key }} size={40} />
+              <Block key={b.id} block={b} src={{ kind: "cell", date, band: band.key }} size={40} />
             ))}
           </div>
         );
@@ -692,7 +695,7 @@ function DetailModal({ detail, onClose, onRemove, onGoto, bevel }) {
             <div style={{ fontWeight: 900, fontSize: 18, color: "#3a3a3a" }}>{block.label}</div>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#6a6a6a", marginTop: 4 }}>{TEX_NAMES[block.tex]}</div>
             <div style={{ fontSize: 13, fontWeight: 900, color: "#3a3a3a", marginTop: 6 }}>
-              📍 {DAY_NAMES[src.day]} · {band.icon} {band.name}
+              📍 {fmtMD(src.date)} {DAY_NAMES[dowIdx(src.date)]} · {band.icon} {band.name}
             </div>
           </div>
         </div>
