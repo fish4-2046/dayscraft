@@ -178,6 +178,19 @@ export default function App() {
     saveLocal({ version: 2, days, customs, materials, totalEver, updatedAt: Date.now() });
   }, [days, customs, materials, totalEver]);
 
+  // 补录模式入口：1.5 秒内连点标题 5 次
+  const tapCount = useRef({ n: 0, t: 0 });
+  const onTitleTap = () => {
+    const now = Date.now();
+    if (now - tapCount.current.t > 1500) tapCount.current.n = 0;
+    tapCount.current = { n: tapCount.current.n + 1, t: now };
+    if (tapCount.current.n >= 5) {
+      tapCount.current.n = 0;
+      setBackfill(true);
+      showToast("🔧 补录模式已开启");
+    }
+  };
+
   const showToast = useCallback((msg) => {
     clearTimeout(toastTimer.current);
     setToast(msg);
@@ -440,7 +453,7 @@ export default function App() {
 
       {/* ===== HUD ===== */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", flexWrap: "wrap" }}>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 900, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", letterSpacing: 2 }}>
+        <h1 onClick={onTitleTap} style={{ margin: 0, fontSize: 20, fontWeight: 900, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", letterSpacing: 2, cursor: "default", userSelect: "none" }}>
           ⛏️ 方块时间
         </h1>
         <div style={{ flex: 1 }} />
@@ -452,6 +465,15 @@ export default function App() {
           {worldNew && <span style={{ position: "absolute", top: -6, right: -6, width: 14, height: 14, background: "#e5484d", border: "2px solid #fff" }} />}
         </PixBtn>
       </div>
+
+      {/* ===== 补录模式横幅 ===== */}
+      {backfill && (
+        <button onClick={() => { setBackfill(false); showToast("补录模式已关闭"); }} style={{
+          ...bevel(true), background: "#e8912d", color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
+          fontWeight: 900, fontSize: 13, padding: "8px 12px", margin: "0 14px 8px",
+          cursor: "pointer", fontFamily: "inherit", textAlign: "center",
+        }}>🔧 补录模式 — 历史日子已解锁，点这里关闭</button>
+      )}
 
       {/* ===== 视图切换 ===== */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 14px 8px", flexWrap: "wrap" }}>
