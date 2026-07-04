@@ -270,8 +270,9 @@ export default function App() {
     e.preventDefault();
     const g = { block, src, x0: e.clientX, y0: e.clientY, mode: "pending", chargeTimer: null, chargeStart: 0 };
     gesture.current = g;
-    // 长按敲碎：仅日视图内、已放置的方块
-    if (src.kind === "cell" && viewRef.current === "day") {
+    const isDone = src.kind === "cell" && !!block.done;
+    // 长按敲碎：仅日视图内、已放置且未完成的方块
+    if (src.kind === "cell" && viewRef.current === "day" && !isDone) {
       g.chargeStart = performance.now();
       g.chargeTimer = setInterval(() => {
         const el = performance.now() - g.chargeStart;
@@ -289,7 +290,7 @@ export default function App() {
     const move = (ev) => {
       const gg = gesture.current;
       if (!gg) return;
-      if (gg.mode === "pending" && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
+      if (gg.mode === "pending" && !(gg.src.kind === "cell" && gg.block.done) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
         if (gg.chargeTimer) { clearInterval(gg.chargeTimer); gg.chargeTimer = null; setCharge(null); }
         gg.mode = "drag";
       }
@@ -371,6 +372,7 @@ export default function App() {
   const Block = ({ block, src, size = 68, showLabel = true }) => {
     const charging = charge && charge.id === block.id;
     const dim = drag && drag.src.kind === "cell" && drag.block.id === block.id;
+    const isDone = !!block.done;
     return (
       <div
         id={"blk-" + block.id}
@@ -380,8 +382,8 @@ export default function App() {
           backgroundImage: TEX[block.tex], backgroundSize: "cover", imageRendering: "pixelated",
           ...bevel(true),
           display: "flex", alignItems: "center", justifyContent: "center",
-          cursor: "grab", touchAction: "none", userSelect: "none",
-          opacity: dim ? 0.25 : 1,
+          cursor: isDone ? "default" : "grab", touchAction: "none", userSelect: "none",
+          opacity: dim ? 0.25 : isDone ? 0.45 : 1,
           animation: charging ? "shake 0.12s infinite" : "none",
           boxShadow: "3px 3px 0 rgba(0,0,0,0.35)",
         }}
@@ -395,6 +397,15 @@ export default function App() {
           }}>{block.label}</span>
         )}
         {charging && <Cracks stage={charge.stage} />}
+        {isDone && <Cracks stage={3} />}
+        {isDone && (
+          <span style={{
+            position: "absolute", top: -8, right: -8, width: 20, height: 20,
+            background: "#6dbb45", border: "2px solid #fff", color: "#fff",
+            fontSize: 13, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center",
+            pointerEvents: "none",
+          }}>✔</span>
+        )}
       </div>
     );
   };
@@ -590,8 +601,8 @@ export default function App() {
         </div>
       )}
 
-      {particles.map((p) => <Particle key={p.key} {...p} />)}
-      {flyers.map((f) => <Flyer key={f.key} {...f} />)}
+      {particles.map(({ key, ...p }) => <Particle key={key} {...p} />)}
+      {flyers.map(({ key, ...f }) => <Flyer key={key} {...f} />)}
 
       {toast && (
         <div style={{
@@ -704,10 +715,14 @@ function DetailModal({ detail, onClose, onRemove, onGoto, bevel }) {
             flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
             ...bevel(true), background: "#6dbb45", color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
           }}>☀️ 去这一天</button>
-          <button onClick={onRemove} style={{
-            flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
-            ...bevel(true), background: "#C6C6C6", color: "#3a3a3a",
-          }}>🧰 移回百宝箱</button>
+          {block.done ? (
+            <div style={{ flex: 1, padding: 10, fontWeight: 900, fontSize: 13, textAlign: "center", color: "#3a3a3a", background: "#b8e6a3", ...bevel(false) }}>✔ 已完成</div>
+          ) : (
+            <button onClick={onRemove} style={{
+              flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
+              ...bevel(true), background: "#C6C6C6", color: "#3a3a3a",
+            }}>🧰 移回百宝箱</button>
+          )}
         </div>
         <div style={{ fontSize: 11, color: "#6a6a6a", marginTop: 10, textAlign: "center" }}>拖动方块可以换到别的格子</div>
       </div>
