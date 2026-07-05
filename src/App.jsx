@@ -453,8 +453,9 @@ export default function App() {
 
       {/* ===== HUD ===== */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", flexWrap: "wrap" }}>
-        <h1 onClick={onTitleTap} style={{ margin: 0, fontSize: 20, fontWeight: 900, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", letterSpacing: 2, cursor: "default", userSelect: "none" }}>
-          ⛏️ 方块时间
+        <h1 onClick={onTitleTap} style={{ margin: 0, display: "flex", flexDirection: "column", lineHeight: 1.1, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", cursor: "default", userSelect: "none" }}>
+          <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 16 }}>⛏️ DaysCraft</span>
+          <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 6, marginTop: 3 }}>方块时间</span>
         </h1>
         <div style={{ flex: 1 }} />
         <MatCounter tex="stone" />
