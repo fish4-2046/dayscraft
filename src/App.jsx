@@ -12,10 +12,17 @@ import {
 import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
 import { completedMaterialHistory } from "./lib/history";
 import { canAddBlock, canPlace, canSmash, validateDropTarget } from "./lib/rules";
-import { deleteTaskTemplate, initialTaskTemplates, updateTaskTemplate } from "./lib/templates";
+import {
+  deleteTaskTemplate,
+  displayTaskLabel,
+  initialTaskTemplates,
+  limitTaskLabelInput,
+  reorderTaskTemplate,
+  updateTaskTemplate,
+} from "./lib/templates";
 
 /* ============================================================
-   方块时间 DaysCraft — 今日视图为默认的"执行页"
+   方块时间 DaysCraft — 周视图为默认的"家庭规划表"
    结构：7 天 × 4 时段（上午/下午/晚上/黑夜）
    周视图 = 和爸妈一起规划（拖方块进格子、换时间）
    日视图 = 孩子执行（长按敲碎）
@@ -153,7 +160,7 @@ export default function App() {
       evening: [],
     } };
   });
-  const [view, setView] = useState("day"); // 默认今日视图
+  const [view, setView] = useState("week"); // 默认周视图
   const [anchorMonday, setAnchorMonday] = useState(thisMonday); // 周视图当前显示的周
   const [dayDate, setDayDate] = useState(today); // 日视图当前显示的天
   const [templates, setTemplates] = useState(() => initialTaskTemplates(PRESETS, saved));
@@ -452,6 +459,14 @@ export default function App() {
     return null;
   };
 
+  const findTemplateAt = (x, y) => {
+    const tiles = document.querySelectorAll("[data-template]");
+    for (const el of tiles) {
+      if (inRect(el.getBoundingClientRect(), x, y)) return el.getAttribute("data-template");
+    }
+    return null;
+  };
+
   /* ---- 手势 ---- */
   const onBlockDown = (e, block, src) => {
     if (e.button != null && e.button !== 0) return;
@@ -510,6 +525,12 @@ export default function App() {
               showToast(validation.message);
             } else {
               placeBlock(gg.src, gg.block, cell.date, cell.band);
+            }
+          } else if (gg.src.kind === "box") {
+            const targetPid = findTemplateAt(ev.clientX, ev.clientY);
+            if (targetPid && targetPid !== gg.block.pid) {
+              setTemplates((blocks) => reorderTaskTemplate(blocks, gg.block.pid, targetPid));
+              showToast("百宝箱顺序已调整");
             }
           } else if (inRect(boxRef.current?.getBoundingClientRect(), ev.clientX, ev.clientY)) {
             removeBlock(gg.src, gg.block);
@@ -580,7 +601,7 @@ export default function App() {
             position: "absolute", bottom: -20, left: "50%", transform: "translateX(-50%)",
             fontSize: 11, fontWeight: 900, color: "#fff", textShadow: "1px 1px 0 #000",
             whiteSpace: "nowrap", pointerEvents: "none",
-          }}>{block.label}</span>
+          }}>{displayTaskLabel(block.label)}</span>
         )}
         {charging && <Cracks stage={charge.stage} />}
         {isDone && <Cracks stage={3} />}
@@ -598,9 +619,26 @@ export default function App() {
 
   const TemplateTile = ({ preset, size, labelSize }) => {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
+      <div data-template={preset.pid} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
         <Block block={{ ...preset, id: "tpl-" + preset.pid }} src={{ kind: "box" }} size={size} showLabel={false} />
-        <span style={{ fontSize: labelSize, fontWeight: 900, color: "#3a3a3a", whiteSpace: "nowrap" }}>{preset.label}</span>
+        <span title={preset.label} style={{ fontSize: labelSize, fontWeight: 900, color: "#3a3a3a", whiteSpace: "nowrap" }}>{displayTaskLabel(preset.label)}</span>
+      </div>
+    );
+  };
+
+  const NewTemplateTile = ({ size }) => {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
+        <button onClick={openNewCustomEditor} style={{
+          width: size, height: size, flexShrink: 0, ...bevel(true), background: "#a8a8a8",
+          padding: 0, appearance: "none",
+          fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
+          fontFamily: "inherit",
+        }}>
+          <span style={{ fontSize: Math.round(size * 0.34), lineHeight: 1 }}>＋</span>
+          <span style={{ fontSize: Math.max(9, Math.round(size * 0.16)), lineHeight: 1, whiteSpace: "nowrap" }}>造方块</span>
+        </button>
       </div>
     );
   };
@@ -757,12 +795,7 @@ export default function App() {
               {allBlocks.map((p) => (
                 <TemplateTile key={p.pid} preset={p} size={56} labelSize={12} />
               ))}
-              <button onClick={openNewCustomEditor} style={{
-                width: 56, height: 56, flexShrink: 0, ...bevel(true), background: "#a8a8a8",
-                fontSize: 20, fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                fontFamily: "inherit",
-              }}>＋<span style={{ fontSize: 9 }}>造方块</span></button>
+              <NewTemplateTile size={56} labelSize={12} />
             </div>
           </div>
         </div>
@@ -780,12 +813,7 @@ export default function App() {
               {allBlocks.map((p) => (
                 <TemplateTile key={p.pid} preset={p} size={60} labelSize={11} />
               ))}
-              <button onClick={openNewCustomEditor} style={{
-                width: 60, height: 60, ...bevel(true), background: "#a8a8a8",
-                fontSize: 20, fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                fontFamily: "inherit",
-              }}>＋<span style={{ fontSize: 9 }}>造方块</span></button>
+              <NewTemplateTile size={60} labelSize={11} />
             </div>
           </div>
 
@@ -1228,12 +1256,12 @@ function BlockEditor({ editingBlock, onClose, onCreate, onUpdate, onDelete, beve
             </div>
 
             <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>
-              3️⃣ 起个名字 <span style={{ fontWeight: 400, fontSize: 11 }}>（可以不写，或请爸爸妈妈帮忙）</span>
+              3️⃣ 起个名字 <span style={{ fontWeight: 400, fontSize: 11 }}>（48 字以内，日程里会简写）</span>
             </div>
             <input
               value={name}
-              onChange={(e) => setName(e.target.value.slice(0, 6))}
-              placeholder="最多 6 个字"
+              onChange={(e) => setName(limitTaskLabelInput(e.target.value))}
+              placeholder="最多 48 个字"
               style={{
                 width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 15, fontWeight: 700,
                 ...bevel(false), background: "#e8e8e8", outline: "none", fontFamily: "inherit", marginBottom: 16,

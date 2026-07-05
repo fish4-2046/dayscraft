@@ -19,3 +19,24 @@ export function updateTaskTemplate(templates, next) {
 export function deleteTaskTemplate(templates, pid) {
   return templates.filter((block) => block.pid !== pid)
 }
+
+export function limitTaskLabelInput(label) {
+  return Array.from(label).slice(0, 48).join('')
+}
+
+export function displayTaskLabel(label) {
+  const chars = Array.from(label ?? '')
+  return chars.length > 4 ? `${chars.slice(0, 4).join('')}...` : chars.join('')
+}
+
+export function reorderTaskTemplate(templates, fromPid, toPid) {
+  if (fromPid === toPid) return templates
+  const fromIndex = templates.findIndex((block) => block.pid === fromPid)
+  const toIndex = templates.findIndex((block) => block.pid === toPid)
+  if (fromIndex < 0 || toIndex < 0) return templates
+
+  const next = [...templates]
+  const [moved] = next.splice(fromIndex, 1)
+  next.splice(toIndex, 0, moved)
+  return next
+}

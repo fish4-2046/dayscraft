@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { deleteTaskTemplate, initialTaskTemplates, updateTaskTemplate } from './templates'
+import {
+  deleteTaskTemplate,
+  displayTaskLabel,
+  initialTaskTemplates,
+  limitTaskLabelInput,
+  reorderTaskTemplate,
+  updateTaskTemplate,
+} from './templates'
 
 const defaults = [
   { pid: 'hw', label: '写作业', tex: 'stone' },
@@ -37,5 +44,30 @@ describe('deleteTaskTemplate', () => {
     expect(deleteTaskTemplate(defaults, 'read')).toEqual([
       { pid: 'hw', label: '写作业', tex: 'stone' },
     ])
+  })
+})
+
+describe('limitTaskLabelInput', () => {
+  it('任务名称最多保留 48 个字符', () => {
+    expect(limitTaskLabelInput('一'.repeat(50))).toBe('一'.repeat(48))
+  })
+})
+
+describe('displayTaskLabel', () => {
+  it('日程和百宝箱里超过 4 个字显示省略号', () => {
+    expect(displayTaskLabel('写作业')).toBe('写作业')
+    expect(displayTaskLabel('一二三四')).toBe('一二三四')
+    expect(displayTaskLabel('一二三四五')).toBe('一二三四...')
+  })
+})
+
+describe('reorderTaskTemplate', () => {
+  it('按 pid 调整任务模板顺序', () => {
+    expect(reorderTaskTemplate(defaults, 'read', 'hw').map((block) => block.pid)).toEqual(['read', 'hw'])
+  })
+
+  it('拖到自己或不存在的模板上时保持原顺序', () => {
+    expect(reorderTaskTemplate(defaults, 'read', 'read')).toBe(defaults)
+    expect(reorderTaskTemplate(defaults, 'read', 'missing')).toBe(defaults)
   })
 })
