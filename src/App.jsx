@@ -10,10 +10,12 @@ import {
   supabaseConfig,
 } from "./lib/cloud";
 import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
-import { canPlace, canSmash } from "./lib/rules";
+import { completedMaterialHistory } from "./lib/history";
+import { canAddBlock, canPlace, canSmash, validateDropTarget } from "./lib/rules";
+import { deleteTaskTemplate, initialTaskTemplates, updateTaskTemplate } from "./lib/templates";
 
 /* ============================================================
-   方块时间 DaysCraft — 周视图为默认的"家庭规划表"
+   方块时间 DaysCraft — 今日视图为默认的"执行页"
    结构：7 天 × 4 时段（上午/下午/晚上/黑夜）
    周视图 = 和爸妈一起规划（拖方块进格子、换时间）
    日视图 = 孩子执行（长按敲碎）
@@ -76,7 +78,6 @@ const BANDS = [
   { key: "evening", name: "晚上", icon: "🌆", sky: "rgba(140,120,200,0.25)" },
   { key: "night", name: "黑夜", icon: "🧟", sky: "rgba(20,20,45,0.55)", sleep: true },
 ];
-const CAP = 3; // 每个时段最多 3 块
 const MONSTERS = ["🧟", "🕷️", "💀", "👾"];
 const CLOUD_ENABLED = supabaseConfig.isConfigured;
 
@@ -152,11 +153,12 @@ export default function App() {
       evening: [],
     } };
   });
-  const [view, setView] = useState("week"); // 默认周视图
+  const [view, setView] = useState("day"); // 默认今日视图
   const [anchorMonday, setAnchorMonday] = useState(thisMonday); // 周视图当前显示的周
   const [dayDate, setDayDate] = useState(today); // 日视图当前显示的天
-  const [customs, setCustoms] = useState(() => saved?.customs ?? []);
+  const [templates, setTemplates] = useState(() => initialTaskTemplates(PRESETS, saved));
   const [showEditor, setShowEditor] = useState(false);
+  const [editingCustom, setEditingCustom] = useState(null);
   const [materials, setMaterials] = useState(() => saved?.materials ?? { stone: 0, grass: 0, wood: 0 });
   const [totalEver, setTotalEver] = useState(() => saved?.totalEver ?? 0);
   const [particles, setParticles] = useState([]);
@@ -168,6 +170,7 @@ export default function App() {
   const [charge, setCharge] = useState(null);
   const [backfill, setBackfill] = useState(false); // 补录模式：临时解锁历史（不持久化）
   const [detail, setDetail] = useState(null); // {block, src} 周视图点击方块的详情弹窗
+  const [materialHistoryTex, setMaterialHistoryTex] = useState(null);
   const [cloudSession, setCloudSession] = useState(null);
   const [cloudStatus, setCloudStatus] = useState(CLOUD_ENABLED ? "checking" : "off");
   const [cloudMessage, setCloudMessage] = useState("");
@@ -178,6 +181,7 @@ export default function App() {
   const boxRef = useRef(null);
   const hudRef = useRef({});
   const toastTimer = useRef(null);
+  const lastToastRef = useRef({ msg: "", t: 0 });
   const cloudTimer = useRef(null);
   const latestStateRef = useRef(saved);
   const firstPersistRef = useRef(true);
@@ -188,11 +192,14 @@ export default function App() {
   const backfillRef = useRef(backfill); backfillRef.current = backfill;
   const ruleOpts = () => ({ today, backfill: backfillRef.current });
 
-  const allBlocks = [...PRESETS, ...customs];
+  const allBlocks = templates;
   const dayOf = (date) => days[date] ?? emptyDay();
   const setDay = (date, updater) => setDays((ds) => ({ ...ds, [date]: updater(ds[date] ?? emptyDay()) }));
 
   const showToast = useCallback((msg) => {
+    const now = Date.now();
+    if (lastToastRef.current.msg === msg && now - lastToastRef.current.t < 450) return;
+    lastToastRef.current = { msg, t: now };
     clearTimeout(toastTimer.current);
     setToast(msg);
     toastTimer.current = setTimeout(() => setToast(null), 1800);
@@ -201,17 +208,17 @@ export default function App() {
   const buildSnapshot = useCallback((updatedAt = Date.now()) => ({
     version: 2,
     days,
-    customs,
+    templates,
     materials,
     totalEver,
     updatedAt,
-  }), [days, customs, materials, totalEver]);
+  }), [days, templates, materials, totalEver]);
 
   const applyCloudState = useCallback((state) => {
     const next = migrate(state, today);
     if (!next) return false;
     setDays(next.days ?? {});
-    setCustoms(next.customs ?? []);
+    setTemplates(initialTaskTemplates(PRESETS, next));
     setMaterials(next.materials ?? { stone: 0, grass: 0, wood: 0 });
     setTotalEver(next.totalEver ?? 0);
     saveLocal(next);
@@ -346,16 +353,14 @@ export default function App() {
   const stageOf = (n) => (n >= 12 ? 5 : n >= 8 ? 4 : n >= 5 ? 3 : n >= 3 ? 2 : n >= 1 ? 1 : 0);
   const worldStage = stageOf(totalEver);
   const nextNeed = [1, 3, 5, 8, 12][worldStage] ?? null;
+  const materialHistory = materialHistoryTex ? completedMaterialHistory(days, materialHistoryTex) : [];
 
   /* ---- 放置 / 移动 ---- */
   const placeBlock = useCallback((src, block, dDate, dBand) => {
     setDays((ds) => {
       const get = (date) => ds[date] ?? emptyDay();
       if (src.kind === "cell" && src.date === dDate && src.band === dBand) return ds; // 原地不动
-      if (get(dDate)[dBand].length >= CAP) {
-        showToast(`${DAY_NAMES[dowIdx(dDate)]}${BANDS.find((b) => b.key === dBand).name}满啦！`);
-        return ds;
-      }
+      if (!canAddBlock(get(dDate)[dBand])) return ds;
       const nds = { ...ds };
       if (src.kind === "cell") {
         nds[src.date] = { ...get(src.date), [src.band]: get(src.date)[src.band].filter((b) => b.id !== block.id) };
@@ -375,6 +380,28 @@ export default function App() {
     setDay(src.date, (d) => ({ ...d, [src.band]: d[src.band].filter((b) => b.id !== block.id) }));
     showToast("方块回百宝箱啦");
   }, [showToast]);
+
+  const deleteTemplate = useCallback((pid) => {
+    setTemplates((blocks) => deleteTaskTemplate(blocks, pid));
+    setEditingCustom(null);
+    setShowEditor(false);
+    showToast("任务已从百宝箱删除，日程里的记录还在");
+  }, [showToast]);
+
+  const openNewCustomEditor = useCallback(() => {
+    setEditingCustom(null);
+    setShowEditor(true);
+  }, []);
+
+  const openEditCustomEditor = useCallback((block) => {
+    setEditingCustom(block);
+    setShowEditor(true);
+  }, []);
+
+  const closeCustomEditor = useCallback(() => {
+    setShowEditor(false);
+    setEditingCustom(null);
+  }, []);
 
   /* ---- 敲碎 ---- */
   const smash = useCallback((src, block) => {
@@ -430,7 +457,7 @@ export default function App() {
     if (e.button != null && e.button !== 0) return;
     ensureAudio();
     e.preventDefault();
-    const g = { block, src, x0: e.clientX, y0: e.clientY, mode: "pending", chargeTimer: null, chargeStart: 0 };
+    const g = { block, src, x0: e.clientX, y0: e.clientY, mode: "pending", chargeTimer: null, chargeStart: 0, downAt: performance.now() };
     gesture.current = g;
     const isDone = src.kind === "cell" && !!block.done;
     // 长按敲碎：仅日视图内、已放置且未完成、日期允许（今天/昨天/补录）的方块
@@ -438,9 +465,11 @@ export default function App() {
       g.chargeStart = performance.now();
       g.chargeTimer = setInterval(() => {
         const el = performance.now() - g.chargeStart;
-        const st = Math.min(3, Math.floor(el / 250) + 1);
-        setCharge((c) => { if (!c || c.stage !== st) sndDig(); return { id: block.id, stage: st }; });
-        if (el >= 760) {
+        if (el >= 320) {
+          const st = Math.min(3, Math.floor((el - 320) / 180) + 1);
+          setCharge((c) => { if (!c || c.stage !== st) sndDig(); return { id: block.id, stage: st }; });
+        }
+        if (el >= 900) {
           clearInterval(g.chargeTimer);
           gesture.current = null;
           setCharge(null);
@@ -452,7 +481,9 @@ export default function App() {
     const move = (ev) => {
       const gg = gesture.current;
       if (!gg) return;
-      if (gg.mode === "pending" && !(gg.src.kind === "cell" && (gg.block.done || !canPlace(gg.src.date, ruleOpts()))) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
+      const held = performance.now() - gg.downAt;
+      const canDragNow = gg.src.kind === "box" || held >= 220;
+      if (gg.mode === "pending" && canDragNow && !(gg.src.kind === "cell" && (gg.block.done || !canPlace(gg.src.date, ruleOpts()))) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
         if (gg.chargeTimer) { clearInterval(gg.chargeTimer); gg.chargeTimer = null; setCharge(null); }
         gg.mode = "drag";
       }
@@ -465,33 +496,18 @@ export default function App() {
       if (gg) {
         if (gg.chargeTimer) { clearInterval(gg.chargeTimer); setCharge(null); }
         if (gg.mode === "pending" && gg.src.kind === "box") {
-          // 点按百宝箱方块
-          if (viewRef.current === "day") {
-            const date = dayDateRef.current;
-            if (!canPlace(date, ruleOpts())) {
-              showToast("过去的日子不能改啦");
-            } else {
-              const d = daysRef.current[date] ?? emptyDay();
-              const band = ["morning", "afternoon", "evening"].find((k) => d[k].length < CAP);
-              if (band) {
-                placeBlock({ kind: "box" }, gg.block, date, band);
-                showToast(`放到${BANDS.find((b) => b.key === band).name}啦，可以拖动换时间`);
-              } else showToast("今天满啦！");
-            }
-          } else {
-            showToast("把方块拖到想放的格子里吧 👆");
-          }
-        } else if (gg.mode === "pending" && gg.src.kind === "cell" && viewRef.current === "week") {
-          // 周视图点按已放置的方块 → 详情弹窗
+          // 点按百宝箱：进入当前任务模板编辑；拖动仍用于摆放
+          openEditCustomEditor(gg.block);
+        } else if (gg.mode === "pending" && gg.src.kind === "cell") {
+          // 点按已放置的方块 → 详情弹窗；更长按不移动才会敲碎
           setDetail({ block: gg.block, src: gg.src });
         } else if (gg.mode === "drag") {
           const cell = findCellAt(ev.clientX, ev.clientY);
           if (cell) {
-            if (!canPlace(cell.date, ruleOpts())) {
-              showToast(cell.date < today ? "过去的日子不能改啦" : "还没到这一天呢");
-            } else if (cell.band === "night") {
-              sndGrowl();
-              showToast("🧟 黑夜有怪物出没，这是睡觉时间！");
+            const validation = validateDropTarget(cell.date, cell.band, ruleOpts());
+            if (!validation.ok) {
+              if (validation.reason === "night") sndGrowl();
+              showToast(validation.message);
             } else {
               placeBlock(gg.src, gg.block, cell.date, cell.band);
             }
@@ -518,7 +534,6 @@ export default function App() {
     border: "4px solid",
     borderColor: raised ? "#ffffff #565656 #565656 #ffffff" : "#565656 #ffffff #ffffff #565656",
   });
-
   const PixBtn = ({ children, onClick, active, style }) => (
     <button onClick={onClick} style={{
       ...bevel(!active), background: active ? "#ffe66d" : "#C6C6C6",
@@ -528,13 +543,14 @@ export default function App() {
   );
 
   const MatCounter = ({ tex }) => (
-    <div ref={(el) => (hudRef.current[tex] = el)} style={{
+    <button ref={(el) => (hudRef.current[tex] = el)} onClick={() => setMaterialHistoryTex(tex)} title={`查看${TEX_NAMES[tex]}完成历史`} style={{
       display: "flex", alignItems: "center", gap: 6, background: "#8B8B8B",
       ...bevel(false), padding: "4px 8px",
+      cursor: "pointer", fontFamily: "inherit",
     }}>
       <div style={{ width: 22, height: 22, backgroundImage: TEX[tex], backgroundSize: "cover", imageRendering: "pixelated", border: "2px solid #3a3a3a" }} />
       <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 13, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", minWidth: 22 }}>{materials[tex]}</span>
-    </div>
+    </button>
   );
 
   const Block = ({ block, src, size = 68, showLabel = true }) => {
@@ -545,12 +561,14 @@ export default function App() {
       <div
         id={"blk-" + block.id}
         onPointerDown={(e) => onBlockDown(e, block, src)}
+        onContextMenu={(e) => e.preventDefault()}
         style={{
           width: size, height: size, position: "relative", flexShrink: 0,
           backgroundImage: TEX[block.tex], backgroundSize: "cover", imageRendering: "pixelated",
           ...bevel(true),
           display: "flex", alignItems: "center", justifyContent: "center",
           cursor: isDone ? "default" : "grab", touchAction: "none", userSelect: "none",
+          WebkitUserSelect: "none", WebkitTouchCallout: "none",
           opacity: dim ? 0.25 : isDone ? 0.45 : 1,
           animation: charging ? "shake 0.12s infinite" : "none",
           boxShadow: "3px 3px 0 rgba(0,0,0,0.35)",
@@ -578,6 +596,15 @@ export default function App() {
     );
   };
 
+  const TemplateTile = ({ preset, size, labelSize }) => {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
+        <Block block={{ ...preset, id: "tpl-" + preset.pid }} src={{ kind: "box" }} size={size} showLabel={false} />
+        <span style={{ fontSize: labelSize, fontWeight: 900, color: "#3a3a3a", whiteSpace: "nowrap" }}>{preset.label}</span>
+      </div>
+    );
+  };
+
   const vertical = typeof window !== "undefined" && window.innerWidth < 640;
   const day = dayOf(dayDate);
   const dates = weekDates(anchorMonday);
@@ -589,7 +616,7 @@ export default function App() {
 
   return (
     <div style={{
-      minHeight: "100vh", fontFamily: "'PingFang SC','Microsoft YaHei',sans-serif",
+      height: "100dvh", minHeight: "100dvh", fontFamily: "'PingFang SC','Microsoft YaHei',sans-serif",
       background: "linear-gradient(#79b8e8 0%, #a8d8f0 55%, #6dbb45 55.2%, #5fae3c 100%)",
       display: "flex", flexDirection: "column", overflow: "hidden", position: "relative",
     }}>
@@ -597,6 +624,7 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
         @keyframes shake { 0%{transform:translate(0,0)} 25%{transform:translate(-2px,1px)} 50%{transform:translate(2px,-1px)} 75%{transform:translate(-1px,-2px)} 100%{transform:translate(1px,2px)} }
         @keyframes popIn { from{transform:scale(0.4);opacity:0} to{transform:scale(1);opacity:1} }
+        @keyframes toastIn { from{transform:translateX(-50%) scale(0.92);opacity:0} to{transform:translateX(-50%) scale(1);opacity:1} }
         @keyframes floaty { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
         @keyframes lurk { 0%,100%{transform:translateX(0)} 50%{transform:translateX(6px)} }
         @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -604,11 +632,56 @@ export default function App() {
 
       {/* ===== HUD ===== */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", flexWrap: "wrap" }}>
-        <h1 onClick={onTitleTap} style={{ margin: 0, display: "flex", flexDirection: "column", lineHeight: 1.1, color: "#fff", textShadow: "2px 2px 0 #3a3a3a", cursor: "default", userSelect: "none" }}>
-          <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 16 }}>⛏️ DaysCraft</span>
-          <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 6, marginTop: 3 }}>方块时间</span>
+        <h1 onClick={onTitleTap} style={{
+          margin: 0, display: "flex", alignItems: "center", gap: 8,
+          lineHeight: 1.05, color: "#fff", textShadow: "2px 2px 0 #3a3a3a",
+          cursor: "default", userSelect: "none",
+        }}>
+          <span style={{
+            width: 34, height: 34, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(58,42,26,0.22)", border: "2px solid rgba(255,255,255,0.72)",
+            boxShadow: "2px 2px 0 rgba(58,42,26,0.55)", fontSize: 22,
+          }}>⛏️</span>
+          <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3 }}>
+            <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 15 }}>DaysCraft</span>
+            <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 2 }}>方块时间</span>
+          </span>
         </h1>
         <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+          <PixBtn active={view === "week"} onClick={() => setView("week")}>🗓️ 一周规划</PixBtn>
+          <PixBtn active={view === "day"} onClick={() => { setDayDate(today); setView("day"); }}>☀️ 今日</PixBtn>
+          {view === "week" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <PixBtn onClick={() => setAnchorMonday((m) => (m > EPOCH_MONDAY ? addDays(m, -7) : m))}
+                style={{ opacity: anchorMonday > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
+              <span style={{
+                fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
+                minWidth: 128, textAlign: "center", background: "#8B8B8B", ...bevel(false),
+                padding: "6px 10px",
+              }}>
+                {fmtMD(anchorMonday)} – {fmtMD(addDays(anchorMonday, 6))}
+              </span>
+              <PixBtn onClick={() => setAnchorMonday((m) => (m < maxMonday() ? addDays(m, 7) : m))}
+                style={{ opacity: anchorMonday < maxMonday() ? 1 : 0.35 }}>›</PixBtn>
+            </div>
+          )}
+          {view === "day" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <PixBtn onClick={() => setDayDate((d) => (d > EPOCH_MONDAY ? addDays(d, -1) : d))}
+                style={{ opacity: dayDate > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
+              <span style={{
+                fontWeight: 900, fontSize: 14, color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
+                minWidth: 136, textAlign: "center", background: "#8B8B8B", ...bevel(false),
+                padding: "6px 10px",
+              }}>
+                {fmtMD(dayDate)} {DAY_NAMES[dowIdx(dayDate)]}{dayDate === today ? "（今天）" : ""}
+              </span>
+              <PixBtn onClick={() => setDayDate((d) => (d < addDays(maxMonday(), 6) ? addDays(d, 1) : d))}
+                style={{ opacity: dayDate < addDays(maxMonday(), 6) ? 1 : 0.35 }}>›</PixBtn>
+            </div>
+          )}
+        </div>
         <MatCounter tex="stone" />
         <MatCounter tex="grass" />
         <MatCounter tex="wood" />
@@ -631,39 +704,15 @@ export default function App() {
         }}>🔧 补录模式 — 历史日子已解锁，点这里关闭</button>
       )}
 
-      {/* ===== 视图切换 ===== */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 14px 8px", flexWrap: "wrap" }}>
-        <PixBtn active={view === "week"} onClick={() => setView("week")}>🗓️ 一周规划</PixBtn>
-        <PixBtn active={view === "day"} onClick={() => { setDayDate(today); setView("day"); }}>☀️ 今日</PixBtn>
-        {view === "week" && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <PixBtn onClick={() => setAnchorMonday((m) => (m > EPOCH_MONDAY ? addDays(m, -7) : m))}
-              style={{ opacity: anchorMonday > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
-            <span style={{ fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", minWidth: 128, textAlign: "center" }}>
-              {fmtMD(anchorMonday)} – {fmtMD(addDays(anchorMonday, 6))}
-            </span>
-            <PixBtn onClick={() => setAnchorMonday((m) => (m < maxMonday() ? addDays(m, 7) : m))}
-              style={{ opacity: anchorMonday < maxMonday() ? 1 : 0.35 }}>›</PixBtn>
-          </div>
-        )}
-        {view === "day" && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <PixBtn onClick={() => setDayDate((d) => (d > EPOCH_MONDAY ? addDays(d, -1) : d))}
-              style={{ opacity: dayDate > EPOCH_MONDAY ? 1 : 0.35 }}>‹</PixBtn>
-            <span style={{ fontWeight: 900, fontSize: 14, color: "#fff", textShadow: "1px 1px 0 #3a3a3a" }}>
-              {fmtMD(dayDate)} {DAY_NAMES[dowIdx(dayDate)]}{dayDate === today ? "（今天）" : ""}
-            </span>
-            <PixBtn onClick={() => setDayDate((d) => (d < addDays(maxMonday(), 6) ? addDays(d, 1) : d))}
-              style={{ opacity: dayDate < addDays(maxMonday(), 6) ? 1 : 0.35 }}>›</PixBtn>
-            {canSmash(dayDate, { today, backfill }) && (
-              <span style={{ fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
-                做完一件，按住方块敲碎它！🔨
-              </span>
-            )}
-          </div>
+      {/* ===== 提示语 ===== */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 14px 8px", minHeight: 18 }}>
+        {view === "day" && canSmash(dayDate, { today, backfill }) && (
+          <span style={{ fontWeight: 900, fontSize: 13, color: "#fff", textShadow: "1px 1px 0 #3a3a3a" }}>
+            做完一件，点方块详情里的「敲碎完成」，也可以长按快捷完成！🔨
+          </span>
         )}
         {view === "week" && (
-          <span style={{ fontWeight: 700, fontSize: 12, color: "#fff", textShadow: "1px 1px 0 #3a3a3a", marginLeft: 6 }}>
+          <span style={{ fontWeight: 700, fontSize: 12, color: "#fff", textShadow: "1px 1px 0 #3a3a3a" }}>
             和爸爸妈妈一起，把这周的方块摆进格子 · 拖动可以换时间 · 点日期进入那一天
           </span>
         )}
@@ -702,16 +751,13 @@ export default function App() {
           {/* 百宝箱托盘 */}
           <div ref={boxRef} style={{ background: "#C6C6C6", ...bevel(true), padding: "10px 12px", flexShrink: 0 }}>
             <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 8 }}>
-              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>拖进上面的格子 · 把格子里的方块拖回来可以移除</span>
+              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>拖进格子 · 点按编辑</span>
             </div>
             <div style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 4, alignItems: "flex-start" }}>
               {allBlocks.map((p) => (
-                <div key={p.pid} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, flexShrink: 0, minWidth: 60 }}>
-                  <Block block={{ ...p, id: "tpl-" + p.pid }} src={{ kind: "box" }} size={56} showLabel={false} />
-                  <span style={{ fontSize: 12, fontWeight: 900, color: "#3a3a3a", whiteSpace: "nowrap" }}>{p.label}</span>
-                </div>
+                <TemplateTile key={p.pid} preset={p} size={56} labelSize={12} />
               ))}
-              <button onClick={() => setShowEditor(true)} style={{
+              <button onClick={openNewCustomEditor} style={{
                 width: 56, height: 56, flexShrink: 0, ...bevel(true), background: "#a8a8a8",
                 fontSize: 20, fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
                 display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -728,16 +774,13 @@ export default function App() {
           {/* 百宝箱 */}
           <div ref={boxRef} style={{ background: "#C6C6C6", ...bevel(true), padding: 12, width: vertical ? "auto" : 190, flexShrink: 0, overflowY: "auto" }}>
             <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 10, color: "#3a3a3a" }}>
-              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>点一下或拖出去</span>
+              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>拖出去摆放 · 点按编辑</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: vertical ? "repeat(5,1fr)" : "repeat(2,1fr)", gap: "10px 6px", justifyItems: "center" }}>
               {allBlocks.map((p) => (
-                <div key={p.pid} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <Block block={{ ...p, id: "tpl-" + p.pid }} src={{ kind: "box" }} size={60} showLabel={false} />
-                  <span style={{ fontSize: 11, fontWeight: 900, color: "#3a3a3a" }}>{p.label}</span>
-                </div>
+                <TemplateTile key={p.pid} preset={p} size={60} labelSize={11} />
               ))}
-              <button onClick={() => setShowEditor(true)} style={{
+              <button onClick={openNewCustomEditor} style={{
                 width: 60, height: 60, ...bevel(true), background: "#a8a8a8",
                 fontSize: 20, fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
                 display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -818,12 +861,20 @@ export default function App() {
         <div style={{
           position: "fixed", top: 70, left: "50%", transform: "translateX(-50%)",
           background: "#3a2a1a", color: "#ffe66d", fontWeight: 900, padding: "10px 18px",
-          ...bevel(true), zIndex: 60, animation: "popIn 0.15s", fontSize: 14, whiteSpace: "nowrap",
+          ...bevel(true), zIndex: 60, animation: "toastIn 0.15s", fontSize: 14, whiteSpace: "nowrap",
         }}>{toast}</div>
       )}
 
       {showWorld && (
         <WorldModal stage={worldStage} totalEver={totalEver} nextNeed={nextNeed} onClose={() => setShowWorld(false)} bevel={bevel} />
+      )}
+      {materialHistoryTex && (
+        <MaterialHistoryModal
+          tex={materialHistoryTex}
+          records={materialHistory}
+          bevel={bevel}
+          onClose={() => setMaterialHistoryTex(null)}
+        />
       )}
       {showCloud && (
         <CloudModal
@@ -844,21 +895,31 @@ export default function App() {
           detail={detail}
           bevel={bevel}
           canEdit={canPlace(detail.src.date, { today, backfill })}
+          canComplete={!detail.block.done && canSmash(detail.src.date, { today, backfill })}
           onClose={() => setDetail(null)}
           onRemove={() => { removeBlock(detail.src, detail.block); setDetail(null); }}
+          onComplete={() => { smash(detail.src, detail.block); setDetail(null); }}
           onGoto={() => { setDayDate(detail.src.date); setView("day"); setDetail(null); sndPlace(); }}
         />
       )}
       {showEditor && (
         <BlockEditor
           bevel={bevel}
-          onClose={() => setShowEditor(false)}
+          editingBlock={editingCustom}
+          onClose={closeCustomEditor}
           onCreate={(blk) => {
-            setCustoms((c) => [...c, { ...blk, pid: "c" + Date.now() }]);
-            setShowEditor(false);
+            setTemplates((blocks) => [...blocks, { ...blk, pid: "c" + Date.now() }]);
+            closeCustomEditor();
             sndPop();
             showToast("✨ 新方块造好啦！");
           }}
+          onUpdate={(blk) => {
+            setTemplates((blocks) => updateTaskTemplate(blocks, blk));
+            closeCustomEditor();
+            sndPop();
+            showToast("任务已更新");
+          }}
+          onDelete={deleteTemplate}
         />
       )}
     </div>
@@ -1002,7 +1063,7 @@ function CloudModal({ configured, session, status, message, busy, onClose, onLog
 }
 
 /* ---------- 方块详情弹窗（周视图点按） ---------- */
-function DetailModal({ detail, onClose, onRemove, onGoto, bevel, canEdit }) {
+function DetailModal({ detail, onClose, onRemove, onComplete, onGoto, bevel, canEdit, canComplete }) {
   const { block, src } = detail;
   const band = BANDS.find((b) => b.key === src.band);
   return (
@@ -1025,94 +1086,182 @@ function DetailModal({ detail, onClose, onRemove, onGoto, bevel, canEdit }) {
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {canComplete && (
+            <button onClick={onComplete} style={{
+              flex: "1 1 130px", padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
+              ...bevel(true), background: "#e8912d", color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
+            }}>🔨 敲碎完成</button>
+          )}
           <button onClick={onGoto} style={{
-            flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
+            flex: "1 1 110px", padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
             ...bevel(true), background: "#6dbb45", color: "#fff", textShadow: "1px 1px 0 #3a3a3a",
           }}>☀️ 去这一天</button>
           {block.done ? (
-            <div style={{ flex: 1, padding: 10, fontWeight: 900, fontSize: 13, textAlign: "center", color: "#3a3a3a", background: "#b8e6a3", ...bevel(false) }}>✔ 已完成</div>
+            <div style={{ flex: "1 1 110px", padding: 10, fontWeight: 900, fontSize: 13, textAlign: "center", color: "#3a3a3a", background: "#b8e6a3", ...bevel(false) }}>✔ 已完成</div>
           ) : canEdit ? (
             <button onClick={onRemove} style={{
-              flex: 1, padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
+              flex: "1 1 130px", padding: 10, fontWeight: 900, fontSize: 13, fontFamily: "inherit", cursor: "pointer",
               ...bevel(true), background: "#C6C6C6", color: "#3a3a3a",
             }}>🧰 移回百宝箱</button>
           ) : (
-            <div style={{ flex: 1, padding: 10, fontWeight: 700, fontSize: 13, textAlign: "center", color: "#6a6a6a", background: "#d8d8d8", ...bevel(false) }}>💤 过去的日子只能看看</div>
+            <div style={{ flex: "1 1 130px", padding: 10, fontWeight: 700, fontSize: 13, textAlign: "center", color: "#6a6a6a", background: "#d8d8d8", ...bevel(false) }}>💤 过去的日子只能看看</div>
           )}
         </div>
-        <div style={{ fontSize: 11, color: "#6a6a6a", marginTop: 10, textAlign: "center" }}>拖动方块可以换到别的格子</div>
+        <div style={{ fontSize: 11, color: "#6a6a6a", marginTop: 10, textAlign: "center" }}>
+          {block.done ? "已完成的记录会留在日程里" : canComplete ? "也可以点按钮完成，长按只是快捷方式" : canEdit ? "按住后拖动方块可以换到别的格子" : "过去的日子只能查看"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 材料完成历史 ---------- */
+function MaterialHistoryModal({ tex, records, onClose, bevel }) {
+  const bandName = (key) => BANDS.find((b) => b.key === key)?.name ?? key;
+  const doneTime = (value) => {
+    if (!value) return "完成时间未记录";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "完成时间未记录";
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,15,10,0.55)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#C6C6C6", ...bevel(true), padding: 18, maxWidth: 440, width: "100%", maxHeight: "82vh", overflowY: "auto", animation: "popIn 0.15s" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 900, fontSize: 16, color: "#3a3a3a" }}>
+            <div style={{ width: 28, height: 28, backgroundImage: TEX[tex], backgroundSize: "cover", imageRendering: "pixelated", border: "2px solid #3a3a3a" }} />
+            {TEX_NAMES[tex]}完成历史
+          </div>
+          <button onClick={onClose} style={{ ...bevel(true), background: "#C6C6C6", fontWeight: 900, cursor: "pointer", padding: "2px 10px", fontFamily: "inherit" }}>✕</button>
+        </div>
+
+        {records.length === 0 ? (
+          <div style={{ color: "#3a3a3a", fontSize: 13, fontWeight: 700, lineHeight: 1.6, background: "#e8e8e8", ...bevel(false), padding: 12 }}>
+            还没有完成过这种材料的任务。
+          </div>
+        ) : (
+          <div style={{ display: "grid", gap: 8 }}>
+            {records.map((record) => (
+              <div key={`${record.date}-${record.band}-${record.id}`} style={{ display: "flex", gap: 10, alignItems: "center", background: "#e8e8e8", ...bevel(false), padding: 10 }}>
+                <div style={{ width: 44, height: 44, flexShrink: 0, backgroundImage: TEX[record.tex], backgroundSize: "cover", imageRendering: "pixelated", ...bevel(true), display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 22 }}>{record.icon}</span>
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 900, color: "#3a3a3a", fontSize: 14 }}>{record.label}</div>
+                  <div style={{ fontWeight: 700, color: "#6a6a6a", fontSize: 12, marginTop: 3 }}>
+                    {fmtMD(record.date)} {DAY_NAMES[dowIdx(record.date)]} · {bandName(record.band)} · {doneTime(record.doneAt)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 /* ---------- 方块工坊 ---------- */
-function BlockEditor({ onClose, onCreate, bevel }) {
-  const [icon, setIcon] = useState(null);
-  const [tex, setTex] = useState("grass");
-  const [name, setName] = useState("");
+function BlockEditor({ editingBlock, onClose, onCreate, onUpdate, onDelete, bevel }) {
+  const isEditing = Boolean(editingBlock);
+  const [icon, setIcon] = useState(editingBlock?.icon ?? null);
+  const [tex, setTex] = useState(editingBlock?.tex ?? "grass");
+  const [name, setName] = useState(editingBlock?.label ?? "");
+  useEffect(() => {
+    setIcon(editingBlock?.icon ?? null);
+    setTex(editingBlock?.tex ?? "grass");
+    setName(editingBlock?.label ?? "");
+  }, [editingBlock]);
+
+  const save = () => {
+    const next = { icon, tex, label: name || "我的方块" };
+    if (isEditing) onUpdate({ ...next, pid: editingBlock.pid });
+    else onCreate(next);
+  };
+
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,15,10,0.65)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#C6C6C6", ...bevel(true), padding: 18, maxWidth: 440, width: "100%", maxHeight: "90vh", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#C6C6C6", ...bevel(true), padding: 18, width: "min(80vw, 760px)", maxWidth: "calc(100vw - 24px)", maxHeight: "90vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontWeight: 900, fontSize: 16, color: "#3a3a3a" }}>⚒️ 方块工坊</div>
+          <div style={{ fontWeight: 900, fontSize: 16, color: "#3a3a3a" }}>⚒️ {isEditing ? "编辑方块" : "方块工坊"}</div>
           <button onClick={onClose} style={{ ...bevel(true), background: "#C6C6C6", fontWeight: 900, cursor: "pointer", padding: "2px 10px", fontFamily: "inherit" }}>✕</button>
         </div>
-        <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
-          <div style={{
-            width: 88, height: 88, backgroundImage: TEX[tex], backgroundSize: "cover", imageRendering: "pixelated",
-            ...bevel(true), display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "4px 4px 0 rgba(0,0,0,0.3)",
-          }}>
-            <span style={{ fontSize: 40 }}>{icon || "❓"}</span>
+
+        <div style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <div style={{
+              width: 96, height: 96, backgroundImage: TEX[tex], backgroundSize: "cover", imageRendering: "pixelated",
+              ...bevel(true), display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: "4px 4px 0 rgba(0,0,0,0.3)",
+            }}>
+              <span style={{ fontSize: 42 }}>{icon || "❓"}</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#3a3a3a", fontWeight: 900, textAlign: "center" }}>{name || "我的方块"}</div>
+          </div>
+
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>1️⃣ 选一种材质</div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+              {["stone", "grass", "wood"].map((t) => (
+                <button key={t} onClick={() => setTex(t)} style={{
+                  flex: "1 1 140px", padding: 8, cursor: "pointer", fontFamily: "inherit",
+                  ...bevel(tex !== t), background: tex === t ? "#ffe66d" : "#b8b8b8",
+                  display: "flex", alignItems: "center", gap: 8,
+                  fontWeight: 900, fontSize: 11, color: "#3a3a3a",
+                }}>
+                  <div style={{ width: 34, height: 34, backgroundImage: TEX[t], backgroundSize: "cover", imageRendering: "pixelated", border: "2px solid #3a3a3a", flexShrink: 0 }} />
+                  {TEX_NAMES[t]}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>2️⃣ 挑一个图标</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(42px, 1fr))", gap: 6, marginBottom: 14 }}>
+              {ICON_LIB.map((ic) => (
+                <button key={ic} onClick={() => setIcon(ic)} style={{
+                  fontSize: 22, padding: "6px 0", cursor: "pointer", fontFamily: "inherit",
+                  ...bevel(icon !== ic), background: icon === ic ? "#ffe66d" : "#b8b8b8",
+                }}>{ic}</button>
+              ))}
+            </div>
+
+            <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>
+              3️⃣ 起个名字 <span style={{ fontWeight: 400, fontSize: 11 }}>（可以不写，或请爸爸妈妈帮忙）</span>
+            </div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value.slice(0, 6))}
+              placeholder="最多 6 个字"
+              style={{
+                width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 15, fontWeight: 700,
+                ...bevel(false), background: "#e8e8e8", outline: "none", fontFamily: "inherit", marginBottom: 16,
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                disabled={!icon}
+                onClick={save}
+                style={{
+                  flex: "1 1 220px", padding: 12, fontSize: 16, fontWeight: 900, fontFamily: "inherit",
+                  ...bevel(true), background: icon ? "#6dbb45" : "#a8a8a8",
+                  color: icon ? "#fff" : "#6a6a6a", cursor: icon ? "pointer" : "not-allowed",
+                  textShadow: icon ? "1px 1px 0 #3a3a3a" : "none",
+                }}
+              >{isEditing ? "💾 保存修改" : "⚒️ 做好啦！"}</button>
+              {isEditing && (
+                <button
+                  onClick={() => onDelete(editingBlock.pid)}
+                  style={{
+                    flex: "0 1 150px", padding: 12, fontSize: 16, fontWeight: 900, fontFamily: "inherit",
+                    ...bevel(true), background: "#C6C6C6", color: "#3a3a3a", cursor: "pointer",
+                  }}
+                >删除</button>
+              )}
+            </div>
           </div>
         </div>
-        <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>1️⃣ 挑一个图标</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 14 }}>
-          {ICON_LIB.map((ic) => (
-            <button key={ic} onClick={() => setIcon(ic)} style={{
-              fontSize: 22, padding: "6px 0", cursor: "pointer", fontFamily: "inherit",
-              ...bevel(icon !== ic), background: icon === ic ? "#ffe66d" : "#b8b8b8",
-            }}>{ic}</button>
-          ))}
-        </div>
-        <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>2️⃣ 选一种材质</div>
-        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-          {["stone", "grass", "wood"].map((t) => (
-            <button key={t} onClick={() => setTex(t)} style={{
-              flex: 1, padding: 8, cursor: "pointer", fontFamily: "inherit",
-              ...bevel(tex !== t), background: tex === t ? "#ffe66d" : "#b8b8b8",
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-              fontWeight: 900, fontSize: 11, color: "#3a3a3a",
-            }}>
-              <div style={{ width: 36, height: 36, backgroundImage: TEX[t], backgroundSize: "cover", imageRendering: "pixelated", border: "2px solid #3a3a3a" }} />
-              {TEX_NAMES[t]}
-            </button>
-          ))}
-        </div>
-        <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 6 }}>
-          3️⃣ 起个名字 <span style={{ fontWeight: 400, fontSize: 11 }}>（可以不写，或请爸爸妈妈帮忙）</span>
-        </div>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value.slice(0, 6))}
-          placeholder="最多 6 个字"
-          style={{
-            width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 15, fontWeight: 700,
-            ...bevel(false), background: "#e8e8e8", outline: "none", fontFamily: "inherit", marginBottom: 16,
-          }}
-        />
-        <button
-          disabled={!icon}
-          onClick={() => onCreate({ icon, tex, label: name || "我的方块" })}
-          style={{
-            width: "100%", padding: 12, fontSize: 16, fontWeight: 900, fontFamily: "inherit",
-            ...bevel(true), background: icon ? "#6dbb45" : "#a8a8a8",
-            color: icon ? "#fff" : "#6a6a6a", cursor: icon ? "pointer" : "not-allowed",
-            textShadow: icon ? "1px 1px 0 #3a3a3a" : "none",
-          }}
-        >⚒️ 做好啦！</button>
       </div>
     </div>
   );

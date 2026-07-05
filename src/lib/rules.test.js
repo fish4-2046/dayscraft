@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canPlace, canSmash } from './rules'
+import { canAddBlock, canPlace, canSmash, validateDropTarget } from './rules'
 
 const T = '2026-07-04' // 固定"今天"便于断言
 
@@ -32,5 +32,40 @@ describe('canSmash（敲碎）', () => {
   })
   it('补录模式下历史可敲', () => {
     expect(canSmash('2026-06-25', { today: T, backfill: true })).toBe(true)
+  })
+})
+
+describe('validateDropTarget（拖放目标校验）', () => {
+  it('黑夜提示优先于过去日期限制，避免一次拖放弹两个错误', () => {
+    expect(validateDropTarget('2026-07-03', 'night', { today: T })).toEqual({
+      ok: false,
+      reason: 'night',
+      message: '🧟 黑夜有怪物出没，这是睡觉时间！',
+    })
+  })
+
+  it('过去的非黑夜日期不可摆放', () => {
+    expect(validateDropTarget('2026-07-03', 'morning', { today: T })).toEqual({
+      ok: false,
+      reason: 'past',
+      message: '过去的日子不能改啦',
+    })
+  })
+
+  it('今天和未来的非黑夜日期可摆放', () => {
+    expect(validateDropTarget('2026-07-04', 'morning', { today: T })).toEqual({ ok: true })
+    expect(validateDropTarget('2026-07-05', 'evening', { today: T })).toEqual({ ok: true })
+  })
+})
+
+describe('canAddBlock（时段容量）', () => {
+  it('允许同一时段放超过三个任务', () => {
+    expect(canAddBlock([
+      { id: 'a' },
+      { id: 'b' },
+      { id: 'c' },
+      { id: 'd' },
+      { id: 'e' },
+    ])).toBe(true)
   })
 })
