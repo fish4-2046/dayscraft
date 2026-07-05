@@ -36,7 +36,7 @@
 - [ ] **Step 1: 安装 Vitest 并加 test 脚本**
 
 ```bash
-cd "/Users/fishsean/Documents/MyWorkOS/10项目/2607方块时间/DaysCraft"
+cd "/Users/fishsean/Documents/MyWorkOS/01项目/2607方块时间/DaysCraft"
 npm install -D vitest
 ```
 
