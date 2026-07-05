@@ -41,5 +41,4 @@ VITE_AUTH_REDIRECT_URL=https://dayscraft.vercel.app
 
 ## 项目资料
 
-产品设计文档（PRD）、持久化方案等规划资料位于：
-`MyWorkOS/01项目/2607方块时间/项目需求/`
+产品设计、路线图、实施计划等本地项目资料不随公开仓库发布。

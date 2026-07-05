@@ -5,3 +5,10 @@ dist
 .env
 .env.*
 !.env.example
+
+# Local-only project notes and implementation plans
+plan.md
+PLAN.md
+*.local.md
+.local/
+docs/plans/
