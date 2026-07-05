@@ -16,16 +16,28 @@
 - React 19 + Vite
 - 原生 Pointer 事件手势（点按 / 拖拽 / 长按敲碎，移动 8px 阈值区分）
 - Web Audio 合成音效，SVG 程序化像素纹理
-- localStorage 本地存档，按天存储（v2，`src/lib/storage.js` 含 v1 自动迁移）；云端 Supabase 同步见规划文档
+- localStorage 本地存档，按天存储（v2，`src/lib/storage.js` 含 v1 自动迁移）；登录后通过 Supabase `app_state` 表云端同步
 - 纯逻辑模块（日期 `dates.js` / 编辑规则 `rules.js` / 存档迁移）有 Vitest 覆盖：`npm test`
 
 ## 开发
+
+线上地址：https://dayscraft.vercel.app/
 
 ```bash
 npm install
 npm run dev      # http://localhost:5173
 npm run build    # 产物在 dist/
 ```
+
+本地云端同步需要复制 `.env.example` 为 `.env.local`，填入：
+
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_PUBLISHABLE_KEY=...
+VITE_AUTH_REDIRECT_URL=https://dayscraft.vercel.app
+```
+
+线上部署时，在 Vercel 项目环境变量里填同样三项；`VITE_AUTH_REDIRECT_URL` 用来确保 Supabase 邮件登录后回到正式站点，而不是本地开发地址。
 
 ## 项目资料
 

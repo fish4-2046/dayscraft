@@ -1,5 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { loadLocal, saveLocal } from "./lib/storage";
+import { loadLocal, saveLocal, migrate } from "./lib/storage";
+import {
+  getCloudSession,
+  loadCloudState,
+  onCloudAuthChange,
+  saveCloudState,
+  signInWithEmail,
+  signOutCloud,
+  supabaseConfig,
+} from "./lib/cloud";
 import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
 import { canPlace, canSmash } from "./lib/rules";
 
@@ -69,6 +78,7 @@ const BANDS = [
 ];
 const CAP = 3; // 每个时段最多 3 块
 const MONSTERS = ["🧟", "🕷️", "💀", "👾"];
+const CLOUD_ENABLED = supabaseConfig.isConfigured;
 
 /* ---------- 音效 ---------- */
 let audioCtx = null;
@@ -158,11 +168,20 @@ export default function App() {
   const [charge, setCharge] = useState(null);
   const [backfill, setBackfill] = useState(false); // 补录模式：临时解锁历史（不持久化）
   const [detail, setDetail] = useState(null); // {block, src} 周视图点击方块的详情弹窗
+  const [cloudSession, setCloudSession] = useState(null);
+  const [cloudStatus, setCloudStatus] = useState(CLOUD_ENABLED ? "checking" : "off");
+  const [cloudMessage, setCloudMessage] = useState("");
+  const [showCloud, setShowCloud] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
 
   const gesture = useRef(null);
   const boxRef = useRef(null);
   const hudRef = useRef({});
   const toastTimer = useRef(null);
+  const cloudTimer = useRef(null);
+  const latestStateRef = useRef(saved);
+  const firstPersistRef = useRef(true);
+  const hasRealLocalRef = useRef(Boolean(saved));
   const viewRef = useRef(view); viewRef.current = view;
   const dayDateRef = useRef(dayDate); dayDateRef.current = dayDate;
   const daysRef = useRef(days); daysRef.current = days;
@@ -173,10 +192,143 @@ export default function App() {
   const dayOf = (date) => days[date] ?? emptyDay();
   const setDay = (date, updater) => setDays((ds) => ({ ...ds, [date]: updater(ds[date] ?? emptyDay()) }));
 
-  /* ---- 本地存档 ---- */
+  const showToast = useCallback((msg) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 1800);
+  }, []);
+
+  const buildSnapshot = useCallback((updatedAt = Date.now()) => ({
+    version: 2,
+    days,
+    customs,
+    materials,
+    totalEver,
+    updatedAt,
+  }), [days, customs, materials, totalEver]);
+
+  const applyCloudState = useCallback((state) => {
+    const next = migrate(state, today);
+    if (!next) return false;
+    setDays(next.days ?? {});
+    setCustoms(next.customs ?? []);
+    setMaterials(next.materials ?? { stone: 0, grass: 0, wood: 0 });
+    setTotalEver(next.totalEver ?? 0);
+    saveLocal(next);
+    latestStateRef.current = next;
+    hasRealLocalRef.current = true;
+    return true;
+  }, [today]);
+
+  const syncFromCloud = useCallback(async () => {
+    if (!CLOUD_ENABLED) return;
+    try {
+      setCloudStatus("loading");
+      const cloud = await loadCloudState();
+      const remote = migrate(cloud, today);
+      const local = latestStateRef.current;
+      if (remote && (!hasRealLocalRef.current || !local || (remote.updatedAt ?? 0) > (local.updatedAt ?? 0))) {
+        applyCloudState(remote);
+        setCloudStatus("saved");
+        setCloudMessage("云端存档已同步到这台设备");
+        showToast("☁️ 云端存档已同步");
+      } else if (local) {
+        await saveCloudState(local);
+        setCloudStatus("saved");
+        setCloudMessage("这台设备的存档已备份到云端");
+      } else {
+        setCloudStatus("saved");
+      }
+    } catch (error) {
+      setCloudStatus("error");
+      setCloudMessage(`云端同步失败：${error.message}`);
+    }
+  }, [applyCloudState, showToast, today]);
+
+  /* ---- 本地优先，登录后云端防抖同步 ---- */
   useEffect(() => {
-    saveLocal({ version: 2, days, customs, materials, totalEver, updatedAt: Date.now() });
-  }, [days, customs, materials, totalEver]);
+    const isFirstPersist = firstPersistRef.current;
+    const snapshot = buildSnapshot(isFirstPersist && saved?.updatedAt ? saved.updatedAt : Date.now());
+    firstPersistRef.current = false;
+    if (!isFirstPersist || saved) hasRealLocalRef.current = true;
+    latestStateRef.current = snapshot;
+    saveLocal(snapshot);
+
+    if (!CLOUD_ENABLED || !cloudSession) return;
+    clearTimeout(cloudTimer.current);
+    setCloudStatus("saving");
+    cloudTimer.current = setTimeout(async () => {
+      try {
+        await saveCloudState(snapshot);
+        setCloudStatus("saved");
+        setCloudMessage("云端已保存");
+      } catch (error) {
+        setCloudStatus("error");
+        setCloudMessage(`云端保存失败：${error.message}`);
+      }
+    }, 1200);
+    return () => clearTimeout(cloudTimer.current);
+  }, [buildSnapshot, cloudSession]);
+
+  useEffect(() => {
+    if (!CLOUD_ENABLED) return;
+    let alive = true;
+    getCloudSession()
+      .then((session) => {
+        if (!alive) return;
+        setCloudSession(session);
+        if (session) syncFromCloud();
+        else setCloudStatus("signed-out");
+      })
+      .catch((error) => {
+        if (!alive) return;
+        setCloudStatus("error");
+        setCloudMessage(`云端状态读取失败：${error.message}`);
+      });
+
+    const unsubscribe = onCloudAuthChange((session) => {
+      setCloudSession(session);
+      if (session) syncFromCloud();
+      else {
+        setCloudStatus("signed-out");
+        setCloudMessage("");
+      }
+    });
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [syncFromCloud]);
+
+  const sendCloudLogin = useCallback(async (email) => {
+    if (!email.trim()) {
+      setCloudMessage("先输入接收登录链接的邮箱");
+      return;
+    }
+    setCloudBusy(true);
+    try {
+      await signInWithEmail(email.trim());
+      setCloudMessage("登录链接已发送，请打开邮件完成登录");
+    } catch (error) {
+      setCloudMessage(`发送失败：${error.message}`);
+    } finally {
+      setCloudBusy(false);
+    }
+  }, []);
+
+  const disconnectCloud = useCallback(async () => {
+    setCloudBusy(true);
+    try {
+      await signOutCloud();
+      setCloudSession(null);
+      setCloudStatus("signed-out");
+      setCloudMessage("已退出云端存档，本机存档仍保留");
+    } catch (error) {
+      setCloudMessage(`退出失败：${error.message}`);
+    } finally {
+      setCloudBusy(false);
+    }
+  }, []);
 
   // 补录模式入口：1.5 秒内连点标题 5 次
   const tapCount = useRef({ n: 0, t: 0 });
@@ -190,12 +342,6 @@ export default function App() {
       showToast("🔧 补录模式已开启");
     }
   };
-
-  const showToast = useCallback((msg) => {
-    clearTimeout(toastTimer.current);
-    setToast(msg);
-    toastTimer.current = setTimeout(() => setToast(null), 1800);
-  }, []);
 
   const stageOf = (n) => (n >= 12 ? 5 : n >= 8 ? 4 : n >= 5 ? 3 : n >= 3 ? 2 : n >= 1 ? 1 : 0);
   const worldStage = stageOf(totalEver);
@@ -435,6 +581,11 @@ export default function App() {
   const vertical = typeof window !== "undefined" && window.innerWidth < 640;
   const day = dayOf(dayDate);
   const dates = weekDates(anchorMonday);
+  const cloudLabel = !CLOUD_ENABLED
+    ? "☁️ 未配置"
+    : cloudSession
+      ? (cloudStatus === "saving" || cloudStatus === "loading" ? "☁️ 同步中" : "☁️ 已同步")
+      : "☁️ 云端存档";
 
   return (
     <div style={{
@@ -461,6 +612,10 @@ export default function App() {
         <MatCounter tex="stone" />
         <MatCounter tex="grass" />
         <MatCounter tex="wood" />
+        <PixBtn onClick={() => setShowCloud(true)} style={{
+          background: cloudSession ? "#b8e6ff" : "#C6C6C6",
+          color: "#3a3a3a",
+        }}>{cloudLabel}</PixBtn>
         <PixBtn onClick={() => { ensureAudio(); setShowWorld(true); setWorldNew(false); }} style={{ position: "relative" }}>
           🏠 我的世界
           {worldNew && <span style={{ position: "absolute", top: -6, right: -6, width: 14, height: 14, background: "#e5484d", border: "2px solid #fff" }} />}
@@ -670,6 +825,20 @@ export default function App() {
       {showWorld && (
         <WorldModal stage={worldStage} totalEver={totalEver} nextNeed={nextNeed} onClose={() => setShowWorld(false)} bevel={bevel} />
       )}
+      {showCloud && (
+        <CloudModal
+          bevel={bevel}
+          configured={CLOUD_ENABLED}
+          session={cloudSession}
+          status={cloudStatus}
+          message={cloudMessage}
+          busy={cloudBusy}
+          onClose={() => setShowCloud(false)}
+          onLogin={sendCloudLogin}
+          onSync={syncFromCloud}
+          onSignOut={disconnectCloud}
+        />
+      )}
       {detail && (
         <DetailModal
           detail={detail}
@@ -739,6 +908,96 @@ function FragmentRow({ band, dates, days, drag, Block, bevel, today }) {
         );
       })}
     </>
+  );
+}
+
+/* ---------- 云端存档 ---------- */
+function CloudModal({ configured, session, status, message, busy, onClose, onLogin, onSync, onSignOut, bevel }) {
+  const [email, setEmail] = useState(session?.user?.email ?? "");
+  const statusText = {
+    checking: "检查中",
+    "signed-out": "未登录",
+    loading: "同步中",
+    saving: "保存中",
+    saved: "已同步",
+    error: "需要处理",
+    off: "未配置",
+  }[status] ?? status;
+
+  const actionButton = (children, onClick, background = "#6dbb45") => (
+    <button
+      onClick={onClick}
+      disabled={busy}
+      style={{
+        flex: 1,
+        padding: 10,
+        fontWeight: 900,
+        fontSize: 13,
+        fontFamily: "inherit",
+        cursor: busy ? "wait" : "pointer",
+        ...bevel(true),
+        background,
+        color: background === "#C6C6C6" ? "#3a3a3a" : "#fff",
+        textShadow: background === "#C6C6C6" ? "none" : "1px 1px 0 #3a3a3a",
+      }}
+    >
+      {children}
+    </button>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,15,10,0.65)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#C6C6C6", ...bevel(true), padding: 18, maxWidth: 390, width: "100%", animation: "popIn 0.15s" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 900, fontSize: 16, color: "#3a3a3a" }}>☁️ 云端存档</div>
+          <button onClick={onClose} style={{ ...bevel(true), background: "#C6C6C6", fontWeight: 900, cursor: "pointer", padding: "2px 10px", fontFamily: "inherit" }}>✕</button>
+        </div>
+
+        <div style={{ background: "#e8e8e8", ...bevel(false), padding: 10, marginBottom: 12, color: "#3a3a3a", fontSize: 13, fontWeight: 700 }}>
+          状态：<b>{statusText}</b>
+          {session?.user?.email ? <div style={{ marginTop: 6, wordBreak: "break-all" }}>{session.user.email}</div> : null}
+        </div>
+
+        {!configured ? (
+          <div style={{ color: "#3a3a3a", fontSize: 13, fontWeight: 700, lineHeight: 1.6 }}>
+            本机还没有 Supabase 环境变量。配置后重新启动应用即可开启。
+          </div>
+        ) : session ? (
+          <div style={{ display: "flex", gap: 8 }}>
+            {actionButton("立即同步", onSync)}
+            {actionButton("退出", onSignOut, "#C6C6C6")}
+          </div>
+        ) : (
+          <>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="邮箱"
+              type="email"
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "10px 12px",
+                fontSize: 15,
+                fontWeight: 700,
+                ...bevel(false),
+                background: "#e8e8e8",
+                outline: "none",
+                fontFamily: "inherit",
+                marginBottom: 10,
+              }}
+            />
+            {actionButton(busy ? "发送中..." : "发送登录链接", () => onLogin(email))}
+          </>
+        )}
+
+        {message && (
+          <div style={{ marginTop: 12, color: status === "error" ? "#b0342f" : "#3a3a3a", fontSize: 12, fontWeight: 700, lineHeight: 1.5 }}>
+            {message}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
