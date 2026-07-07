@@ -15,6 +15,17 @@ export function canAddBlock() {
   return true
 }
 
+export function insertBlockAt(blocks, block, beforeId) {
+  if (beforeId && beforeId === block.id) return blocks
+
+  const next = blocks.filter((item) => item.id !== block.id)
+  const targetIndex = beforeId ? next.findIndex((item) => item.id === beforeId) : -1
+  if (targetIndex < 0) return [...next, block]
+
+  next.splice(targetIndex, 0, block)
+  return next
+}
+
 export function validateDropTarget(date, band, opts = {}) {
   if (band === 'night') {
     return {

@@ -11,7 +11,7 @@ import {
 } from "./lib/cloud";
 import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
 import { completedMaterialHistory } from "./lib/history";
-import { canAddBlock, canPlace, canSmash, validateDropTarget } from "./lib/rules";
+import { canAddBlock, canPlace, canSmash, insertBlockAt, validateDropTarget } from "./lib/rules";
 import {
   deleteTaskTemplate,
   displayTaskLabel,
@@ -363,10 +363,10 @@ export default function App() {
   const materialHistory = materialHistoryTex ? completedMaterialHistory(days, materialHistoryTex) : [];
 
   /* ---- 放置 / 移动 ---- */
-  const placeBlock = useCallback((src, block, dDate, dBand) => {
+  const placeBlock = useCallback((src, block, dDate, dBand, beforeId = null) => {
     setDays((ds) => {
       const get = (date) => ds[date] ?? emptyDay();
-      if (src.kind === "cell" && src.date === dDate && src.band === dBand) return ds; // 原地不动
+      if (src.kind === "cell" && src.date === dDate && src.band === dBand && beforeId === block.id) return ds; // 原地不动
       if (!canAddBlock(get(dDate)[dBand])) return ds;
       const nds = { ...ds };
       if (src.kind === "cell") {
@@ -376,7 +376,7 @@ export default function App() {
       const inst = src.kind === "box"
         ? { id: uid(), icon: block.icon, label: block.label, tex: block.tex }
         : block;
-      nds[dDate] = { ...base, [dBand]: [...base[dBand], inst] };
+      nds[dDate] = { ...base, [dBand]: insertBlockAt(base[dBand], inst, beforeId) };
       sndPlace();
       return nds;
     });
@@ -467,6 +467,17 @@ export default function App() {
     return null;
   };
 
+  const findScheduledBlockAt = (x, y) => {
+    const blocks = document.querySelectorAll("[data-scheduled-block]");
+    for (const el of blocks) {
+      if (inRect(el.getBoundingClientRect(), x, y)) {
+        const [date, band, id] = el.getAttribute("data-scheduled-block").split("|");
+        return { date, band, id };
+      }
+    }
+    return null;
+  };
+
   /* ---- 手势 ---- */
   const onBlockDown = (e, block, src) => {
     if (e.button != null && e.button !== 0) return;
@@ -524,7 +535,11 @@ export default function App() {
               if (validation.reason === "night") sndGrowl();
               showToast(validation.message);
             } else {
-              placeBlock(gg.src, gg.block, cell.date, cell.band);
+              const targetBlock = findScheduledBlockAt(ev.clientX, ev.clientY);
+              const beforeId = targetBlock && targetBlock.date === cell.date && targetBlock.band === cell.band
+                ? targetBlock.id
+                : null;
+              placeBlock(gg.src, gg.block, cell.date, cell.band, beforeId);
             }
           } else if (gg.src.kind === "box") {
             const targetPid = findTemplateAt(ev.clientX, ev.clientY);
@@ -581,6 +596,7 @@ export default function App() {
     return (
       <div
         id={"blk-" + block.id}
+        data-scheduled-block={src.kind === "cell" ? `${src.date}|${src.band}|${block.id}` : undefined}
         onPointerDown={(e) => onBlockDown(e, block, src)}
         onContextMenu={(e) => e.preventDefault()}
         style={{

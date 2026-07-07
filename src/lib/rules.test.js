@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canAddBlock, canPlace, canSmash, validateDropTarget } from './rules'
+import { canAddBlock, canPlace, canSmash, validateDropTarget, insertBlockAt } from './rules'
 
 const T = '2026-07-04' // 固定"今天"便于断言
 
@@ -67,5 +67,21 @@ describe('canAddBlock（时段容量）', () => {
       { id: 'd' },
       { id: 'e' },
     ])).toBe(true)
+  })
+})
+
+describe('insertBlockAt（任务顺序）', () => {
+  const blocks = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+
+  it('把任务插入到目标任务前面', () => {
+    expect(insertBlockAt(blocks, { id: 'c' }, 'a').map((block) => block.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  it('没有目标任务时追加到末尾', () => {
+    expect(insertBlockAt(blocks, { id: 'a' }).map((block) => block.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('拖到自己身上时保持原数组引用不变', () => {
+    expect(insertBlockAt(blocks, { id: 'b' }, 'b')).toBe(blocks)
   })
 })
