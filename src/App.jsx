@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { Fragment, useState, useRef, useEffect, useCallback } from "react";
 import { loadLocal, saveLocal, migrate } from "./lib/storage";
 import {
   getCloudSession,
@@ -12,6 +12,7 @@ import {
 import { todayStr, addDays, mondayOf, weekDates, dowIdx, maxMonday, fmtMD, fmtShort, EPOCH_MONDAY } from "./lib/dates";
 import { completedMaterialHistory } from "./lib/history";
 import { canAddBlock, canPlace, canSmash, insertBlockAt, validateDropTarget } from "./lib/rules";
+import { syncScheduledBlocksWithTemplate } from "./lib/scheduledTasks";
 import {
   deleteTaskTemplate,
   displayTaskLabel,
@@ -20,6 +21,9 @@ import {
   reorderTaskTemplate,
   updateTaskTemplate,
 } from "./lib/templates";
+import { scheduledDropBeforeIdFromRects, templateDropBeforePidFromRects } from "./lib/dragInsert";
+import { toolboxGestureIntent } from "./lib/gestureIntent";
+import { dayToolboxPanelLayout, dayToolboxStripLayout, newTemplateButtonLayout, weekCellTaskLayout } from "./lib/layout";
 
 /* ============================================================
    方块时间 DaysCraft — 周视图为默认的"家庭规划表"
@@ -64,7 +68,7 @@ const TEX_COLORS = {
   grass: ["#5fae3c", "#8a5a32", "#6dbb45"],
   wood: ["#9c6b30", "#7b4e22", "#a87938"],
 };
-const TEX_NAMES = { stone: "学习·石头", grass: "玩耍·草块", wood: "家务·木头" };
+const TEX_NAMES = { stone: "学习·石头", grass: "玩耍·草块", wood: "生活·木头" };
 
 /* ---------- 常量 ---------- */
 const PRESETS = [
@@ -77,7 +81,7 @@ const PRESETS = [
   { pid: "fish", icon: "🐟", label: "喂鱼", tex: "wood" },
   { pid: "toys", icon: "🧸", label: "收玩具", tex: "wood" },
 ];
-const ICON_LIB = ["🧮","📚","🖍️","🔤","🧪","🎻","🥁","🏊","🚴","🧗","🏀","⚽","🎮","🧩","🪁","🎬","🎧","🦖","🪥","🛁","🧹","🍽️","🌱","🐕","🛏️","🥛","🍎","🧊"];
+const ICON_LIB = ["🔢","✏️","📖","📚","🐥","🎹","⚽","🎨","📺","🐟","🧸","🖍️","🔤","🧪","🎻","🥁","🏊","🚴","🧗","🏀","🎮","🧩","🪁","🎬","🎧","🦖","🪥","🛁","🧹","🍽️","🌱","🐕","🛏️","🥛","🍎","🧊"];
 const DAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const BANDS = [
   { key: "morning", name: "上午", icon: "☀️", sky: "rgba(255,236,150,0.28)" },
@@ -200,6 +204,7 @@ export default function App() {
   const ruleOpts = () => ({ today, backfill: backfillRef.current });
 
   const allBlocks = templates;
+  const vertical = typeof window !== "undefined" && window.innerWidth < 640;
   const dayOf = (date) => days[date] ?? emptyDay();
   const setDay = (date, updater) => setDays((ds) => ({ ...ds, [date]: updater(ds[date] ?? emptyDay()) }));
 
@@ -374,7 +379,7 @@ export default function App() {
       }
       const base = nds[dDate] ?? emptyDay();
       const inst = src.kind === "box"
-        ? { id: uid(), icon: block.icon, label: block.label, tex: block.tex }
+        ? { id: uid(), pid: block.pid, icon: block.icon, label: block.label, tex: block.tex }
         : block;
       nds[dDate] = { ...base, [dBand]: insertBlockAt(base[dBand], inst, beforeId) };
       sndPlace();
@@ -459,23 +464,43 @@ export default function App() {
     return null;
   };
 
-  const findTemplateAt = (x, y) => {
-    const tiles = document.querySelectorAll("[data-template]");
-    for (const el of tiles) {
-      if (inRect(el.getBoundingClientRect(), x, y)) return el.getAttribute("data-template");
-    }
-    return null;
+  const templateRects = () => Array.from(document.querySelectorAll("[data-template]")).map((el) => ({
+    pid: el.getAttribute("data-template"),
+    rect: el.getBoundingClientRect(),
+  }));
+
+  const scheduledBlockRectsIn = (date, band) => {
+    return Array.from(document.querySelectorAll(`[data-scheduled-block^="${date}|${band}|"]`)).map((el) => {
+      const [, , id] = el.getAttribute("data-scheduled-block").split("|");
+      const rect = el.getBoundingClientRect();
+      return { id, rect };
+    });
   };
 
-  const findScheduledBlockAt = (x, y) => {
-    const blocks = document.querySelectorAll("[data-scheduled-block]");
-    for (const el of blocks) {
-      if (inRect(el.getBoundingClientRect(), x, y)) {
-        const [date, band, id] = el.getAttribute("data-scheduled-block").split("|");
-        return { date, band, id };
-      }
-    }
-    return null;
+  const getDropHover = (x, y, block) => {
+    const cell = findCellAt(x, y);
+    if (!cell) return null;
+
+    return {
+      ...cell,
+      beforeId: scheduledDropBeforeIdFromRects(scheduledBlockRectsIn(cell.date, cell.band), {
+        pointerX: x,
+        pointerY: y,
+        draggingId: block.id,
+      }),
+    };
+  };
+
+  const getTemplateHover = (x, y, block) => {
+    if (!inRect(boxRef.current?.getBoundingClientRect(), x, y)) return null;
+
+    return {
+      beforePid: templateDropBeforePidFromRects(templateRects(), {
+        pointerX: x,
+        pointerY: y,
+        draggingPid: block.pid,
+      }),
+    };
   };
 
   /* ---- 手势 ---- */
@@ -483,7 +508,12 @@ export default function App() {
     if (e.button != null && e.button !== 0) return;
     ensureAudio();
     e.preventDefault();
-    const g = { block, src, x0: e.clientX, y0: e.clientY, mode: "pending", chargeTimer: null, chargeStart: 0, downAt: performance.now() };
+    const strip = src.kind === "box" ? e.currentTarget.closest("[data-toolbox-strip]") : null;
+    const g = {
+      block, src, x0: e.clientX, y0: e.clientY, mode: "pending",
+      chargeTimer: null, chargeStart: 0, downAt: performance.now(),
+      scrollEl: strip, scrollLeft: strip?.scrollLeft ?? 0, scrollTop: strip?.scrollTop ?? 0,
+    };
     gesture.current = g;
     const isDone = src.kind === "cell" && !!block.done;
     // 长按敲碎：仅日视图内、已放置且未完成、日期允许（今天/昨天/补录）的方块
@@ -508,13 +538,40 @@ export default function App() {
       const gg = gesture.current;
       if (!gg) return;
       const held = performance.now() - gg.downAt;
+      const dx = ev.clientX - gg.x0;
+      const dy = ev.clientY - gg.y0;
       const canDragNow = gg.src.kind === "box" || held >= 220;
-      if (gg.mode === "pending" && canDragNow && !(gg.src.kind === "cell" && (gg.block.done || !canPlace(gg.src.date, ruleOpts()))) && Math.hypot(ev.clientX - gg.x0, ev.clientY - gg.y0) > 8) {
+      if (gg.mode === "pending" && gg.src.kind === "box") {
+        const intent = toolboxGestureIntent({ dx, dy, toolbox: gg.src.toolbox });
+        if (intent === "scroll") {
+          gg.mode = "scroll";
+          setDrag(null);
+        } else if (intent === "pending") {
+          return;
+        }
+      }
+      if (gg.mode === "scroll") {
+        ev.preventDefault();
+        if (gg.scrollEl) {
+          if (gg.src.toolbox === "week") gg.scrollEl.scrollLeft = gg.scrollLeft - dx;
+          if (gg.src.toolbox === "day") gg.scrollEl.scrollTop = gg.scrollTop - dy;
+        }
+        return;
+      }
+      if (gg.mode === "pending" && canDragNow && !(gg.src.kind === "cell" && (gg.block.done || !canPlace(gg.src.date, ruleOpts()))) && Math.hypot(dx, dy) > 8) {
         if (gg.chargeTimer) { clearInterval(gg.chargeTimer); gg.chargeTimer = null; setCharge(null); }
         gg.mode = "drag";
       }
       if (gg.mode === "drag") {
-        setDrag({ block: gg.block, src: gg.src, x: ev.clientX, y: ev.clientY, hover: findCellAt(ev.clientX, ev.clientY) });
+        ev.preventDefault();
+        setDrag({
+          block: gg.block,
+          src: gg.src,
+          x: ev.clientX,
+          y: ev.clientY,
+          hover: getDropHover(ev.clientX, ev.clientY, gg.block),
+          templateHover: gg.src.kind === "box" ? getTemplateHover(ev.clientX, ev.clientY, gg.block) : null,
+        });
       }
     };
     const up = (ev) => {
@@ -528,24 +585,23 @@ export default function App() {
           // 点按已放置的方块 → 详情弹窗；更长按不移动才会敲碎
           setDetail({ block: gg.block, src: gg.src });
         } else if (gg.mode === "drag") {
-          const cell = findCellAt(ev.clientX, ev.clientY);
+          const cell = getDropHover(ev.clientX, ev.clientY, gg.block);
           if (cell) {
             const validation = validateDropTarget(cell.date, cell.band, ruleOpts());
             if (!validation.ok) {
               if (validation.reason === "night") sndGrowl();
               showToast(validation.message);
             } else {
-              const targetBlock = findScheduledBlockAt(ev.clientX, ev.clientY);
-              const beforeId = targetBlock && targetBlock.date === cell.date && targetBlock.band === cell.band
-                ? targetBlock.id
-                : null;
-              placeBlock(gg.src, gg.block, cell.date, cell.band, beforeId);
+              placeBlock(gg.src, gg.block, cell.date, cell.band, cell.beforeId);
             }
           } else if (gg.src.kind === "box") {
-            const targetPid = findTemplateAt(ev.clientX, ev.clientY);
-            if (targetPid && targetPid !== gg.block.pid) {
-              setTemplates((blocks) => reorderTaskTemplate(blocks, gg.block.pid, targetPid));
-              showToast("百宝箱顺序已调整");
+            const templateHover = getTemplateHover(ev.clientX, ev.clientY, gg.block);
+            if (templateHover) {
+              const nextTemplates = reorderTaskTemplate(templates, gg.block.pid, templateHover.beforePid);
+              if (nextTemplates !== templates) {
+                setTemplates(nextTemplates);
+                showToast("百宝箱顺序已调整");
+              }
             }
           } else if (inRect(boxRef.current?.getBoundingClientRect(), ev.clientX, ev.clientY)) {
             removeBlock(gg.src, gg.block);
@@ -591,7 +647,10 @@ export default function App() {
 
   const Block = ({ block, src, size = 68, showLabel = true }) => {
     const charging = charge && charge.id === block.id;
-    const dim = drag && drag.src.kind === "cell" && drag.block.id === block.id;
+    const dim = drag && (
+      (drag.src.kind === "cell" && drag.block.id === block.id)
+      || (drag.src.kind === "box" && drag.block.pid === block.pid)
+    );
     const isDone = !!block.done;
     return (
       <div
@@ -604,9 +663,13 @@ export default function App() {
           backgroundImage: TEX[block.tex], backgroundSize: "cover", imageRendering: "pixelated",
           ...bevel(true),
           display: "flex", alignItems: "center", justifyContent: "center",
-          cursor: isDone ? "default" : "grab", touchAction: "none", userSelect: "none",
+          cursor: isDone ? "default" : "grab",
+          touchAction: "none",
+          userSelect: "none",
           WebkitUserSelect: "none", WebkitTouchCallout: "none",
           opacity: dim ? 0.25 : isDone ? 0.45 : 1,
+          transform: dim ? "scale(0.94)" : "scale(1)",
+          transition: "transform 160ms cubic-bezier(.2,.8,.2,1), opacity 140ms ease, box-shadow 140ms ease",
           animation: charging ? "shake 0.12s infinite" : "none",
           boxShadow: "3px 3px 0 rgba(0,0,0,0.35)",
         }}
@@ -633,10 +696,15 @@ export default function App() {
     );
   };
 
-  const TemplateTile = ({ preset, size, labelSize }) => {
+  const TemplateTile = ({ preset, size, labelSize, toolbox, isDragged = false }) => {
     return (
-      <div data-template={preset.pid} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
-        <Block block={{ ...preset, id: "tpl-" + preset.pid }} src={{ kind: "box" }} size={size} showLabel={false} />
+      <div data-template={preset.pid} style={{
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4,
+        transform: isDragged ? "scale(0.96)" : "scale(1)",
+        transition: "transform 170ms cubic-bezier(.2,.8,.2,1), opacity 140ms ease, filter 140ms ease",
+        filter: isDragged ? "saturate(0.85)" : "none",
+      }}>
+        <Block block={{ ...preset, id: "tpl-" + preset.pid }} src={{ kind: "box", toolbox }} size={size} showLabel={false} />
         <span title={preset.label} style={{ fontSize: labelSize, fontWeight: 900, color: "#3a3a3a", whiteSpace: "nowrap" }}>{displayTaskLabel(preset.label)}</span>
       </div>
     );
@@ -646,10 +714,8 @@ export default function App() {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0, minWidth: size + 4 }}>
         <button onClick={openNewCustomEditor} style={{
-          width: size, height: size, flexShrink: 0, ...bevel(true), background: "#a8a8a8",
-          padding: 0, appearance: "none",
+          ...newTemplateButtonLayout(size), ...bevel(true), background: "#a8a8a8",
           fontWeight: 900, color: "#3a3a3a", cursor: "pointer",
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
           fontFamily: "inherit",
         }}>
           <span style={{ fontSize: Math.round(size * 0.34), lineHeight: 1 }}>＋</span>
@@ -659,7 +725,36 @@ export default function App() {
     );
   };
 
-  const vertical = typeof window !== "undefined" && window.innerWidth < 640;
+  const renderTemplateTiles = (toolbox, size, labelSize) => {
+    const templateHover = drag?.src.kind === "box" ? drag.templateHover : null;
+    const showSlot = Boolean(templateHover);
+    const draggingPid = showSlot ? drag.block.pid : null;
+    const previewBlocks = showSlot ? allBlocks.filter((p) => p.pid !== draggingPid) : allBlocks;
+    const draggedIndex = showSlot ? allBlocks.findIndex((p) => p.pid === draggingPid) : -1;
+    const afterDraggedPid = draggedIndex >= 0 ? allBlocks[draggedIndex + 1]?.pid ?? null : null;
+    const beforePid = templateHover?.beforePid === draggingPid
+      ? afterDraggedPid
+      : templateHover?.beforePid ?? null;
+
+    return (
+      <>
+        {previewBlocks.map((p) => (
+          <Fragment key={p.pid}>
+            {showSlot && beforePid === p.pid && <TemplateDropSlot size={size} labelSize={labelSize} />}
+            <TemplateTile
+              preset={p}
+              size={size}
+              labelSize={labelSize}
+              toolbox={toolbox}
+              isDragged={false}
+            />
+          </Fragment>
+        ))}
+        {showSlot && beforePid == null && <TemplateDropSlot size={size} labelSize={labelSize} />}
+      </>
+    );
+  };
+
   const day = dayOf(dayDate);
   const dates = weekDates(anchorMonday);
   const cloudLabel = !CLOUD_ENABLED
@@ -678,6 +773,10 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
         @keyframes shake { 0%{transform:translate(0,0)} 25%{transform:translate(-2px,1px)} 50%{transform:translate(2px,-1px)} 75%{transform:translate(-1px,-2px)} 100%{transform:translate(1px,2px)} }
         @keyframes popIn { from{transform:scale(0.4);opacity:0} to{transform:scale(1);opacity:1} }
+        @keyframes insertMarkerIn { from{opacity:0;transform:scaleY(0.6)} to{opacity:1;transform:scaleY(1)} }
+        @keyframes insertMarkerPulse { 0%,100%{filter:drop-shadow(0 0 1px rgba(255,230,109,0.45))} 50%{filter:drop-shadow(0 0 6px rgba(255,230,109,0.85))} }
+        @keyframes templateSlotIn { from{opacity:0;transform:scale(0.78)} to{opacity:1;transform:scale(1)} }
+        @keyframes dragGhostIn { from{opacity:0;transform:scale(0.82) rotate(-6deg)} to{opacity:1;transform:scale(1.08) rotate(-2deg)} }
         @keyframes toastIn { from{transform:translateX(-50%) scale(0.92);opacity:0} to{transform:translateX(-50%) scale(1);opacity:1} }
         @keyframes floaty { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
         @keyframes lurk { 0%,100%{transform:translateX(0)} 50%{transform:translateX(6px)} }
@@ -805,12 +904,14 @@ export default function App() {
           {/* 百宝箱托盘 */}
           <div ref={boxRef} style={{ background: "#C6C6C6", ...bevel(true), padding: "10px 12px", flexShrink: 0 }}>
             <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a", marginBottom: 8 }}>
-              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>拖进格子 · 点按编辑</span>
+              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>左右滑动查看更多 · 向上拖进格子 · 点按编辑</span>
             </div>
-            <div style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 4, alignItems: "flex-start" }}>
-              {allBlocks.map((p) => (
-                <TemplateTile key={p.pid} preset={p} size={56} labelSize={12} />
-              ))}
+            <div data-toolbox-strip="week" style={{
+              display: "flex", gap: 12, paddingBottom: 6, alignItems: "flex-start",
+              overflowX: "auto", overflowY: "hidden", touchAction: "none",
+              WebkitOverflowScrolling: "touch", overscrollBehaviorX: "contain",
+            }}>
+              {renderTemplateTiles("week", 56, 12)}
               <NewTemplateTile size={56} labelSize={12} />
             </div>
           </div>
@@ -821,14 +922,18 @@ export default function App() {
       {view === "day" && (
         <div style={{ flex: 1, display: "flex", flexDirection: vertical ? "column-reverse" : "row", gap: 12, padding: "0 14px 14px", minHeight: 0 }}>
           {/* 百宝箱 */}
-          <div ref={boxRef} style={{ background: "#C6C6C6", ...bevel(true), padding: 12, width: vertical ? "auto" : 190, flexShrink: 0, overflowY: "auto" }}>
-            <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 10, color: "#3a3a3a" }}>
-              🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>拖出去摆放 · 点按编辑</span>
+          <div ref={boxRef} style={{ background: "#C6C6C6", ...bevel(true), padding: 12, ...dayToolboxPanelLayout(vertical), flexShrink: 0, overflow: "hidden" }}>
+            <div style={{ display: "flex", flexDirection: vertical ? "row" : "column", alignItems: vertical ? "center" : "stretch", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+              <div style={{ fontWeight: 900, fontSize: 13, color: "#3a3a3a" }}>
+                🧰 百宝箱 <span style={{ fontWeight: 400, fontSize: 11 }}>上下滑动查看更多 · 横向拖出去摆放 · 点按编辑</span>
+              </div>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: vertical ? "repeat(5,1fr)" : "repeat(2,1fr)", gap: "10px 6px", justifyItems: "center" }}>
-              {allBlocks.map((p) => (
-                <TemplateTile key={p.pid} preset={p} size={60} labelSize={11} />
-              ))}
+            <div data-toolbox-strip="day" style={{
+              display: "grid", gridTemplateColumns: vertical ? "repeat(5, minmax(60px, 1fr))" : "repeat(2,1fr)",
+              gap: "10px 6px", justifyItems: "center",
+              ...dayToolboxStripLayout(vertical),
+            }}>
+              {renderTemplateTiles("day", 60, 11)}
               <NewTemplateTile size={60} labelSize={11} />
             </div>
           </div>
@@ -839,6 +944,7 @@ export default function App() {
               const isNight = band.sleep;
               const blocks = isNight ? [] : day[band.key];
               const hovered = drag && drag.hover && drag.hover.date === dayDate && drag.hover.band === band.key;
+              const insertBeforeId = hovered && !isNight ? drag.hover.beforeId : undefined;
               return (
                 <div
                   key={band.key}
@@ -869,12 +975,21 @@ export default function App() {
                           空空的，拖个方块过来吧
                         </span>
                       )}
-                      <div style={{ display: "flex", gap: 22, flexWrap: "wrap", paddingBottom: 14 }}>
+                      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", paddingBottom: 14, alignItems: "center" }}>
                         {blocks.map((b) => (
-                          <div key={b.id} style={{ animation: "popIn 0.18s" }}>
-                            <Block block={b} src={{ kind: "cell", date: dayDate, band: band.key }} size={68} />
-                          </div>
+                          <Fragment key={b.id}>
+                            {insertBeforeId === b.id && <DropInsertMarker />}
+                            <div style={{
+                              animation: "popIn 0.18s",
+                              transition: "transform 170ms cubic-bezier(.2,.8,.2,1), opacity 140ms ease, filter 140ms ease",
+                              transform: drag?.src.kind === "cell" && drag.block.id === b.id ? "scale(0.92)" : "scale(1)",
+                              filter: insertBeforeId === b.id ? "drop-shadow(0 0 6px rgba(255,230,109,0.7))" : "none",
+                            }}>
+                              <Block block={b} src={{ kind: "cell", date: dayDate, band: band.key }} size={68} />
+                            </div>
+                          </Fragment>
                         ))}
+                        {hovered && !isNight && insertBeforeId == null && <DropInsertMarker />}
                       </div>
                     </>
                   )}
@@ -891,8 +1006,11 @@ export default function App() {
           position: "fixed", left: drag.x - 36, top: drag.y - 36, width: 72, height: 72,
           backgroundImage: TEX[drag.block.tex], backgroundSize: "cover", imageRendering: "pixelated",
           ...bevel(true), display: "flex", alignItems: "center", justifyContent: "center",
-          pointerEvents: "none", zIndex: 50, transform: "scale(1.1) rotate(-3deg)",
-          boxShadow: "6px 8px 0 rgba(0,0,0,0.3)",
+          pointerEvents: "none", zIndex: 50, transform: "scale(1.08) rotate(-2deg)",
+          animation: "dragGhostIn 120ms ease-out",
+          transition: "box-shadow 140ms ease, filter 140ms ease",
+          boxShadow: "7px 10px 0 rgba(0,0,0,0.28), 0 0 14px rgba(255,230,109,0.25)",
+          filter: "drop-shadow(0 2px 0 rgba(255,255,255,0.28))",
         }}>
           <span style={{ fontSize: 30 }}>{drag.block.icon}</span>
         </div>
@@ -959,6 +1077,7 @@ export default function App() {
           }}
           onUpdate={(blk) => {
             setTemplates((blocks) => updateTaskTemplate(blocks, blk));
+            setDays((ds) => syncScheduledBlocksWithTemplate(ds, editingCustom, blk));
             closeCustomEditor();
             sndPop();
             showToast("任务已更新");
@@ -966,6 +1085,59 @@ export default function App() {
           onDelete={deleteTemplate}
         />
       )}
+    </div>
+  );
+}
+
+function DropInsertMarker() {
+  return (
+    <div
+      aria-hidden="true"
+      data-drop-insert-marker="true"
+      style={{
+        width: 8,
+        height: 78,
+        flex: "0 0 8px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "insertMarkerIn 120ms ease-out, insertMarkerPulse 0.75s ease-in-out infinite",
+      }}
+    >
+      <div style={{
+        width: 4,
+        height: 58,
+        background: "#ffe66d",
+        boxShadow: "0 0 0 1px rgba(255,255,255,0.45), 0 0 8px rgba(255,230,109,0.72)",
+      }} />
+    </div>
+  );
+}
+
+function TemplateDropSlot({ size, labelSize }) {
+  return (
+    <div
+      aria-hidden="true"
+      data-template-drop-slot="true"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 4,
+        flexShrink: 0,
+        minWidth: size + 4,
+        animation: "templateSlotIn 120ms ease-out",
+      }}
+    >
+      <div style={{
+        width: size,
+        height: size,
+        boxSizing: "border-box",
+        border: "3px dashed #ffe66d",
+        background: "rgba(255,230,109,0.16)",
+        boxShadow: "inset 0 0 0 2px rgba(255,255,255,0.55), 0 0 10px rgba(255,230,109,0.36)",
+      }} />
+      <span style={{ height: labelSize + 2, fontSize: labelSize, lineHeight: `${labelSize + 2}px` }} />
     </div>
   );
 }
@@ -1003,7 +1175,7 @@ function FragmentRow({ band, dates, days, drag, Block, bevel, today }) {
             border: hairline,
             background: date === today ? "rgba(255,230,109,0.30)" : date < today ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.12)",
             minHeight: 92, padding: 6,
-            display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", alignContent: "flex-start",
+            ...weekCellTaskLayout(),
             outline: hovered ? "3px dashed #ffe66d" : "none", outlineOffset: -5,
           }}>
             {d[band.key].map((b) => (

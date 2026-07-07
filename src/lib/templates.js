@@ -29,14 +29,15 @@ export function displayTaskLabel(label) {
   return chars.length > 4 ? `${chars.slice(0, 4).join('')}...` : chars.join('')
 }
 
-export function reorderTaskTemplate(templates, fromPid, toPid) {
-  if (fromPid === toPid) return templates
+export function reorderTaskTemplate(templates, fromPid, beforePid) {
+  if (fromPid === beforePid) return templates
   const fromIndex = templates.findIndex((block) => block.pid === fromPid)
-  const toIndex = templates.findIndex((block) => block.pid === toPid)
-  if (fromIndex < 0 || toIndex < 0) return templates
+  if (fromIndex < 0) return templates
+  if (beforePid != null && !templates.some((block) => block.pid === beforePid)) return templates
 
   const next = [...templates]
   const [moved] = next.splice(fromIndex, 1)
-  next.splice(toIndex, 0, moved)
+  const beforeIndex = beforePid == null ? next.length : next.findIndex((block) => block.pid === beforePid)
+  next.splice(beforeIndex, 0, moved)
   return next
 }

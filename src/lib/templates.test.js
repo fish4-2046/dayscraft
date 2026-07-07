@@ -70,4 +70,24 @@ describe('reorderTaskTemplate', () => {
     expect(reorderTaskTemplate(defaults, 'read', 'read')).toBe(defaults)
     expect(reorderTaskTemplate(defaults, 'read', 'missing')).toBe(defaults)
   })
+
+  it('移动到后面的模板前时保持插入位置准确', () => {
+    const templates = [
+      { pid: 'homework' },
+      { pid: 'reading' },
+      { pid: 'piano' },
+      { pid: 'sport' },
+    ]
+
+    expect(reorderTaskTemplate(templates, 'reading', 'sport').map((block) => block.pid)).toEqual([
+      'homework',
+      'piano',
+      'reading',
+      'sport',
+    ])
+  })
+
+  it('beforePid 为空时移动到末尾', () => {
+    expect(reorderTaskTemplate(defaults, 'hw', null).map((block) => block.pid)).toEqual(['read', 'hw'])
+  })
 })
